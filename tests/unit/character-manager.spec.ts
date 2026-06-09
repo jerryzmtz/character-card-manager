@@ -293,7 +293,7 @@ describe('角色卡管理器组件', () => {
           creator: '测试作者',
           description: '她负责验证详情预览。',
           first_mes: '你好，旅行者。',
-          alternate_greetings: ['第二开场'],
+          alternate_greetings: ['第二开场', '第三开场', '第四开场', '第五开场', '第六开场'],
           character_book: '夜城世界书',
           character_version: '1.2',
         },
@@ -313,7 +313,26 @@ describe('角色卡管理器组件', () => {
 
     expect(wrapper.text()).toContain('夜城世界书');
     expect(wrapper.text()).toContain('待整理');
+    expect(wrapper.text()).toContain('开场白');
+    expect(wrapper.find('.cm-greeting-tabs').exists()).toBe(false);
+    expect(wrapper.find('.cm-greeting-pager output').text()).toBe('1 / 6');
+    expect(wrapper.find('.cm-greeting-pager select').exists()).toBe(true);
+    expect(wrapper.get('.cm-greeting-body').text()).not.toContain('开场白 1');
+    expect(wrapper.get('.cm-greeting-body').text()).toContain('你好，旅行者。');
+    expect(wrapper.text()).not.toContain('第三开场');
+    await wrapper.findAll('.cm-greeting-pager button')[1].trigger('click');
+    await wrapper.findAll('.cm-greeting-pager button')[1].trigger('click');
+    expect(wrapper.find('.cm-greeting-pager output').text()).toBe('3 / 6');
+    expect(wrapper.get('.cm-greeting-body').text()).toContain('第三开场');
+    await wrapper.find('.cm-greeting-pager select').setValue('5');
+    expect(wrapper.find('.cm-greeting-pager output').text()).toBe('6 / 6');
+    expect(wrapper.get('.cm-greeting-body').text()).toContain('第六开场');
     expect(wrapper.text()).not.toContain('??');
+
+    await wrapper.get('.cm-detail-tags button').trigger('click');
+    expect(wrapper.text()).toContain('1 个匹配项');
+    expect(wrapper.findAll('.cm-tag-filter > button')[2].attributes('aria-pressed')).toBe('true');
+    expect(wrapper.get('.cm-detail-tags button').classes()).toContain('active');
   });
 
   it('支持选择模式、全选当前结果、清空和标签写入预览', async () => {

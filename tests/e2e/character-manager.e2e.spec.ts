@@ -31,7 +31,9 @@ test.beforeEach(async ({ page }) => {
         date_last_chat: 1700000500000,
         data: {
           creator: '测试作者',
-          description: '夜城里的观察者，负责验证中文 DOM。',
+          description:
+            '夜城里的观察者，负责验证中文 DOM。'.repeat(120) +
+            '\n\n她会带着很长的角色说明，专门验证右侧详情栏使用内部滚动，而不是把整个面板撑高。',
           first_mes: '你好，旅行者。',
           character_book: '夜城世界书',
           character_version: '1.0',
@@ -91,7 +93,14 @@ test.beforeEach(async ({ page }) => {
             creator: selected.data.creator,
             description: selected.data.description,
             first_mes: selected.data.first_mes || '',
-            alternate_greetings: selected.name === '莉莉丝' ? ['第二开场'] : [],
+            alternate_greetings:
+              selected.name === '莉莉丝'
+                ? [
+                    '第二开场：你从夜色里推门进来，她抬头看向你。'.repeat(60),
+                    '第三开场：雨声压过街道，她把终端屏幕转向你。'.repeat(60),
+                    '第四开场：旧电梯停在顶楼，空气里全是未说出口的线索。'.repeat(60),
+                  ]
+                : [],
             character_book: selected.data.character_book || '',
             character_version: selected.data.character_version || '',
           },
@@ -142,6 +151,47 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   await expect(page.getByText('夜城里的观察者，负责验证中文 DOM。')).toBeVisible();
   await expect(page.locator('.cm-preview')).toContainText('夜城世界书');
   await expect(page.locator('.cm-preview')).toContainText('待整理');
+  await expect(page.locator('.cm-preview')).toContainText('开场白');
+  await expect(page.locator('.cm-greeting-tabs')).toHaveCount(0);
+  await expect(page.locator('.cm-greeting-pager output')).toHaveText('1 / 4');
+  await expect(page.getByLabel('上一条开场白')).toBeDisabled();
+  await expect(page.getByLabel('下一条开场白')).toBeEnabled();
+  await expect(page.getByLabel('跳转开场白')).toHaveCount(0);
+  await expect(page.locator('.cm-greeting-body')).not.toContainText('开场白 1');
+  await expect(page.locator('.cm-greeting-body')).toContainText('你好，旅行者。');
+  await expect(page.locator('.cm-greeting-body')).not.toContainText('第三开场');
+  await page.getByLabel('下一条开场白').click();
+  await page.getByLabel('下一条开场白').click();
+  await expect(page.locator('.cm-greeting-pager output')).toHaveText('3 / 4');
+  await expect(page.locator('.cm-greeting-body')).toContainText('第三开场');
+  await expect
+    .poll(() =>
+      page.locator('.cm-preview').evaluate(element => ({
+        hasPanelScroll: element.scrollHeight > element.clientHeight,
+        overflowY: getComputedStyle(element).overflowY,
+        scrollbarWidth: getComputedStyle(element).scrollbarWidth,
+      })),
+    )
+    .toEqual({ hasPanelScroll: true, overflowY: 'auto', scrollbarWidth: 'none' });
+  await expect(page.locator('.cm-greeting-body')).toHaveCSS('overflow-y', 'visible');
+  await expect(page.locator('.cm-alt-greeting-list')).toHaveCount(0);
+  await page.locator('.cm-detail-tags button', { hasText: '待整理' }).click();
+  await expect(page.getByText('1 个匹配项')).toBeVisible();
+  await expect(page.getByRole('button', { name: '待整理 1' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.cm-detail-tags button', { hasText: '待整理' })).toHaveAttribute('aria-pressed', 'true');
+  await expect
+    .poll(() =>
+      page.locator('.cm-preview').evaluate(element => {
+        const previewHeight = Math.round(element.getBoundingClientRect().height);
+        const workspaceHeight = Math.round(element.closest('.cm-workspace')?.getBoundingClientRect().height || 0);
+        return {
+          fitsWorkspace: previewHeight > 0 && workspaceHeight > 0 && previewHeight <= workspaceHeight,
+          overflowY: getComputedStyle(element).overflowY,
+          scrollbarWidth: getComputedStyle(element).scrollbarWidth,
+        };
+      }),
+    )
+    .toEqual({ fitsWorkspace: true, overflowY: 'auto', scrollbarWidth: 'none' });
   await expect(page.getByText('关联世界书：夜城世界书')).toHaveCount(0);
   await expect(page.locator('.cm-preview-head')).not.toContainText('莉莉丝.png');
 });

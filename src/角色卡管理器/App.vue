@@ -39,6 +39,7 @@ const globalIssues = ref<string[]>([]);
 const leftCollapsed = ref(false);
 const rightCollapsed = ref(false);
 const cardSizeIndex = ref(1);
+const selectedGreetingIndex = ref(0);
 const selectionMode = ref(false);
 const selectedFiles = ref<Set<string>>(new Set());
 const tagAction = ref<TagMutationAction>('add');
@@ -101,12 +102,17 @@ const previewFirstMessage = computed(() => {
   if (!detailPreview.value) return '';
   return 'first_mes' in detailPreview.value ? detailPreview.value.first_mes : detailPreview.value.firstMes;
 });
-const previewAltGreetingCount = computed(() => {
-  if (!detailPreview.value) return 0;
-  return 'alternate_greetings' in detailPreview.value
-    ? detailPreview.value.alternate_greetings.length
-    : detailPreview.value.altGreetingCount;
-});
+const previewAltGreetings = computed(() =>
+  detailPreview.value && 'alternate_greetings' in detailPreview.value ? detailPreview.value.alternate_greetings : [],
+);
+const greetingOptions = computed(() =>
+  [previewFirstMessage.value, ...previewAltGreetings.value].map((text, index) => ({
+    label: `开场白 ${index + 1}`,
+    text,
+  })),
+);
+const selectedGreeting = computed(() => greetingOptions.value[selectedGreetingIndex.value] || greetingOptions.value[0]);
+const greetingPageLabel = computed(() => `${Math.min(selectedGreetingIndex.value + 1, greetingOptions.value.length)} / ${greetingOptions.value.length}`);
 const cardSize = computed(() => cardSizes[cardSizeIndex.value]);
 const cardGridStyle = computed(() => ({ '--cm-card-min': `${cardSize.value.width}px` }));
 
@@ -121,6 +127,7 @@ onUnmounted(() => {
 async function refreshList() {
   loadingList.value = true;
   selectedDetail.value = null;
+  selectedGreetingIndex.value = 0;
   globalIssues.value = [];
   try {
     const result = await readCharacterList();
@@ -167,6 +174,7 @@ async function selectCharacter(character: CharacterSummary) {
   const requestId = detailRequestId + 1;
   detailRequestId = requestId;
   selectedFile.value = character.fileName;
+  selectedGreetingIndex.value = 0;
   loadingDetail.value = false;
   clearDetailLoadingTimer();
   detailLoadingTimer = setTimeout(() => {
@@ -255,6 +263,11 @@ function handleAvatarError(character: CharacterSummary | CharacterDetail) {
 
 function changeCardSize(delta: number) {
   cardSizeIndex.value = Math.min(Math.max(cardSizeIndex.value + delta, 0), cardSizes.length - 1);
+}
+
+function changeGreeting(delta: number) {
+  const lastIndex = Math.max(greetingOptions.value.length - 1, 0);
+  selectedGreetingIndex.value = Math.min(Math.max(selectedGreetingIndex.value + delta, 0), lastIndex);
 }
 
 function toggleSelectionMode() {
@@ -667,7 +680,18 @@ function requestClose() {
           <div class="cm-detail-tags">
             <strong>标签</strong>
             <span v-if="activePreview.tags.length === 0">无</span>
-            <span v-for="tag in activePreview.tags" v-else :key="tag.id">{{ tag.name }}</span>
+            <button
+              v-for="tag in activePreview.tags"
+              v-else
+              :key="tag.id"
+              type="button"
+              :class="{ active: activeTagIds.includes(tag.id) }"
+              :aria-pressed="activeTagIds.includes(tag.id)"
+              :title="`筛选标签：${tag.name}`"
+              @click="activateTagFilter(tag.id)"
+            >
+              {{ tag.name }}
+            </button>
           </div>
 
           <div v-if="loadingDetail" class="cm-inline-status">正在读取详情...</div>
@@ -683,14 +707,43 @@ function requestClose() {
             <p>{{ truncate(previewDescription, '无内容', 160) }}</p>
           </article>
 
-          <article class="cm-section">
-            <h3>主开场白</h3>
-            <p>{{ truncate(previewFirstMessage, '无内容', 160) }}</p>
-          </article>
-
-          <article class="cm-section">
-            <h3>备选开场白</h3>
-            <p>{{ previewAltGreetingCount }} 条</p>
+          <article class="cm-section cm-greeting-section">
+            <div class="cm-section-head">
+              <h3>开场白</h3>
+              <div v-if="greetingOptions.length > 1" class="cm-greeting-pager" aria-label="切换开场白">
+                <button
+                  type="button"
+                  title="上一条开场白"
+                  aria-label="上一条开场白"
+                  :disabled="selectedGreetingIndex === 0"
+                  @click="changeGreeting(-1)"
+                >
+                  ‹
+                </button>
+                <output aria-live="polite">{{ greetingPageLabel }}</output>
+                <button
+                  type="button"
+                  title="下一条开场白"
+                  aria-label="下一条开场白"
+                  :disabled="selectedGreetingIndex >= greetingOptions.length - 1"
+                  @click="changeGreeting(1)"
+                >
+                  ›
+                </button>
+                <select
+                  v-if="greetingOptions.length > 5"
+                  v-model.number="selectedGreetingIndex"
+                  aria-label="跳转开场白"
+                >
+                  <option v-for="(_option, index) in greetingOptions" :key="index" :value="index">
+                    {{ index + 1 }}
+                  </option>
+                </select>
+              </div>
+            </div>
+            <div class="cm-greeting-body" aria-label="开场白内容">
+              <p>{{ selectedGreeting.text || (loadingDetail ? '正在读取详情...' : '无内容') }}</p>
+            </div>
           </article>
         </template>
       </section>
@@ -751,11 +804,26 @@ function requestClose() {
   --cm-bg: oklch(16% 0.012 248);
   --cm-panel: oklch(20% 0.012 248);
   --cm-panel-2: oklch(24% 0.014 248);
+  --cm-control-bg: var(--cm-bg);
+  --cm-card-bg: var(--cm-bg);
   --cm-border: oklch(34% 0.018 248);
   --cm-text: oklch(91% 0.01 248);
   --cm-muted: oklch(70% 0.018 248);
   --cm-weak: oklch(55% 0.018 248);
   --cm-accent: oklch(62% 0.16 250);
+  --cm-accent-text: oklch(87% 0.06 250);
+  --cm-accent-bg: oklch(24% 0.025 250);
+  --cm-accent-contrast: oklch(18% 0.014 248);
+  --cm-hover: oklch(92% 0.01 248 / 8%);
+  --cm-toggle-color: oklch(78% 0.018 248 / 54%);
+  --cm-toggle-hover: oklch(88% 0.025 248 / 82%);
+  --cm-media-bg: oklch(13% 0.01 248);
+  --cm-scrim: oklch(13% 0.012 248 / 84%);
+  --cm-badge-bg: oklch(13% 0.012 248 / 82%);
+  --cm-scrollbar: oklch(70% 0.018 248 / 42%);
+  --cm-scrollbar-hover: oklch(78% 0.018 248 / 58%);
+  --cm-backdrop: oklch(8% 0.01 248 / 76%);
+  --cm-primary-bg: oklch(28% 0.055 250);
   --cm-warning: oklch(76% 0.13 82);
   --cm-danger: oklch(65% 0.16 25);
   height: 100vh;
@@ -831,7 +899,7 @@ function requestClose() {
 
 .cm-icon-button[aria-pressed='true'] {
   border-color: var(--cm-accent);
-  color: oklch(87% 0.06 250);
+  color: var(--cm-accent-text);
 }
 
 .cm-icon-button.danger {
@@ -846,8 +914,10 @@ function requestClose() {
   grid-template-columns: minmax(210px, 240px) minmax(480px, 1fr) minmax(300px, 360px);
   gap: 12px;
   margin-top: 12px;
+  height: calc(100% - 12px);
   min-height: 0;
-  align-items: start;
+  align-items: stretch;
+  overflow: hidden;
   transition: grid-template-columns 160ms ease;
 }
 
@@ -874,7 +944,7 @@ function requestClose() {
   border: 0;
   border-radius: 999px;
   background: transparent;
-  color: oklch(78% 0.018 248 / 54%);
+  color: var(--cm-toggle-color);
   cursor: pointer;
   opacity: 0.58;
   transform: translateY(-50%);
@@ -888,8 +958,8 @@ function requestClose() {
 
 .cm-panel-toggle:hover,
 .cm-panel-toggle:focus-visible {
-  background: oklch(92% 0.01 248 / 8%);
-  color: oklch(88% 0.025 248 / 82%);
+  background: var(--cm-hover);
+  color: var(--cm-toggle-hover);
   opacity: 1;
 }
 
@@ -944,6 +1014,7 @@ function requestClose() {
 .cm-list-panel,
 .cm-preview {
   min-height: 0;
+  height: 100%;
   max-height: 100%;
   border: 1px solid var(--cm-border);
   border-radius: 8px;
@@ -1007,7 +1078,7 @@ function requestClose() {
   height: 34px;
   border: 1px solid var(--cm-border);
   border-radius: 6px;
-  background: var(--cm-bg);
+  background: var(--cm-control-bg);
   color: var(--cm-text);
   padding: 0 10px;
 }
@@ -1085,7 +1156,7 @@ function requestClose() {
 
 .cm-tag-filter button.active {
   border-color: var(--cm-accent);
-  color: oklch(87% 0.06 250);
+  color: var(--cm-accent-text);
 }
 
 .cm-tag-filter span {
@@ -1107,7 +1178,7 @@ function requestClose() {
   margin-top: 12px;
   border: 1px solid var(--cm-border);
   border-radius: 6px;
-  background: var(--cm-bg);
+  background: var(--cm-control-bg);
   padding: 10px;
 }
 
@@ -1206,7 +1277,7 @@ function requestClose() {
   min-height: 28px;
   border: 1px solid var(--cm-border);
   border-radius: 6px;
-  background: var(--cm-bg);
+  background: var(--cm-control-bg);
   color: var(--cm-text);
   padding: 0 9px;
   font-size: 12px;
@@ -1218,7 +1289,7 @@ function requestClose() {
 
 .cm-selection-toggle[aria-pressed='true'] {
   border-color: var(--cm-accent);
-  color: oklch(87% 0.06 250);
+  color: var(--cm-accent-text);
 }
 
 .cm-list-tools output {
@@ -1234,7 +1305,7 @@ function requestClose() {
   padding: 2px;
   border: 1px solid var(--cm-border);
   border-radius: 6px;
-  background: var(--cm-bg);
+  background: var(--cm-control-bg);
 }
 
 .cm-gallery-tools button {
@@ -1282,7 +1353,7 @@ function requestClose() {
   padding: 8px;
   border: 1px solid transparent;
   border-radius: 8px;
-  background: var(--cm-bg);
+  background: var(--cm-card-bg);
   color: var(--cm-text);
   text-align: left;
   cursor: pointer;
@@ -1292,7 +1363,7 @@ function requestClose() {
 .cm-card.active,
 .cm-card.selected {
   border-color: var(--cm-accent);
-  background: oklch(24% 0.025 250);
+  background: var(--cm-accent-bg);
 }
 
 .cm-card.selected {
@@ -1309,7 +1380,7 @@ function requestClose() {
   width: 28px;
   height: 28px;
   border-radius: 6px;
-  background: oklch(13% 0.012 248 / 84%);
+  background: var(--cm-scrim);
   cursor: pointer;
 }
 
@@ -1326,7 +1397,7 @@ function requestClose() {
   aspect-ratio: 3 / 4;
   border-radius: 6px;
   overflow: hidden;
-  background: oklch(13% 0.01 248);
+  background: var(--cm-media-bg);
 }
 
 .cm-thumb img {
@@ -1335,7 +1406,7 @@ function requestClose() {
   height: 100%;
   object-fit: contain;
   image-rendering: auto;
-  background: oklch(13% 0.01 248);
+  background: var(--cm-media-bg);
 }
 
 .cm-card-badges {
@@ -1352,8 +1423,8 @@ function requestClose() {
   display: inline-grid;
   place-items: center;
   border-radius: 999px;
-  background: oklch(13% 0.012 248 / 82%);
-  color: oklch(86% 0.07 250);
+  background: var(--cm-badge-bg);
+  color: var(--cm-accent-text);
   font-size: 11px;
   line-height: 1;
 }
@@ -1363,7 +1434,7 @@ function requestClose() {
   height: 100%;
   object-fit: cover;
   image-rendering: auto;
-  background: oklch(13% 0.01 248);
+  background: var(--cm-media-bg);
 }
 
 .cm-card-text {
@@ -1389,6 +1460,7 @@ function requestClose() {
   display: grid;
   align-content: start;
   gap: 10px;
+  overscroll-behavior: contain;
 }
 
 .cm-preview-head {
@@ -1423,7 +1495,7 @@ function requestClose() {
   margin: 0;
   border: 1px solid var(--cm-border);
   border-radius: 6px;
-  background: var(--cm-bg);
+  background: var(--cm-control-bg);
   overflow: hidden;
 }
 
@@ -1477,7 +1549,7 @@ function requestClose() {
 .cm-selection-summary {
   border: 1px solid var(--cm-border);
   border-radius: 6px;
-  background: var(--cm-bg);
+  background: var(--cm-control-bg);
   padding: 10px;
 }
 
@@ -1495,12 +1567,37 @@ function requestClose() {
   font-size: 12px;
 }
 
-.cm-detail-tags span {
+.cm-detail-tags span,
+.cm-detail-tags button {
   border: 1px solid var(--cm-border);
   border-radius: 999px;
   color: var(--cm-muted);
   padding: 2px 7px;
   font-size: 12px;
+}
+
+.cm-detail-tags button {
+  background: transparent;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.cm-detail-tags button:hover,
+.cm-detail-tags button:focus-visible {
+  border-color: var(--cm-accent);
+  color: var(--cm-text);
+  background: var(--cm-panel-2);
+}
+
+.cm-detail-tags button:focus-visible {
+  outline: 1px solid var(--cm-accent);
+  outline-offset: 2px;
+}
+
+.cm-detail-tags button.active {
+  border-color: var(--cm-accent);
+  color: var(--cm-accent-text);
+  background: var(--cm-accent-bg);
 }
 
 .cm-tag-editor {
@@ -1516,7 +1613,7 @@ function requestClose() {
   min-height: 32px;
   border: 1px solid var(--cm-accent);
   border-radius: 6px;
-  background: oklch(28% 0.055 250);
+  background: var(--cm-primary-bg);
   color: var(--cm-text);
   cursor: pointer;
 }
@@ -1550,12 +1647,77 @@ function requestClose() {
   font-size: 12px;
 }
 
+.cm-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .cm-section p {
   margin: 5px 0 0;
   color: var(--cm-muted);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.cm-greeting-body {
+  margin-top: 8px;
+}
+
+.cm-greeting-pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.cm-greeting-pager button,
+.cm-greeting-pager select {
+  height: 26px;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-control-bg);
+  color: var(--cm-text);
+}
+
+.cm-greeting-pager button {
+  width: 28px;
+  padding: 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cm-greeting-pager output {
+  min-width: 44px;
+  color: var(--cm-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.cm-greeting-pager select {
+  width: 52px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+.cm-greeting-pager button:hover:not(:disabled),
+.cm-greeting-pager button:focus-visible,
+.cm-greeting-pager select:focus-visible {
+  border-color: var(--cm-accent);
+  background: var(--cm-panel-2);
+}
+
+.cm-greeting-pager button:focus-visible,
+.cm-greeting-pager select:focus-visible {
+  outline: 1px solid var(--cm-accent);
+  outline-offset: 2px;
+}
+
+.cm-greeting-pager button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
 }
 
 .cm-settings-backdrop {
@@ -1565,7 +1727,7 @@ function requestClose() {
   display: grid;
   place-items: center;
   padding: 18px;
-  background: oklch(8% 0.01 248 / 76%);
+  background: var(--cm-backdrop);
 }
 
 .cm-settings {
@@ -1624,7 +1786,7 @@ function requestClose() {
   padding: 3px;
   border: 1px solid var(--cm-border);
   border-radius: 8px;
-  background: var(--cm-bg);
+  background: var(--cm-control-bg);
 }
 
 .cm-segmented button {
@@ -1639,8 +1801,8 @@ function requestClose() {
 }
 
 .cm-segmented button.active {
-  background: oklch(72% 0.045 92);
-  color: oklch(18% 0.014 248);
+  background: var(--cm-accent);
+  color: var(--cm-accent-contrast);
 }
 
 @media (max-width: 1080px) {
