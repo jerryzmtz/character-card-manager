@@ -380,7 +380,7 @@ describe('角色卡管理器组件', () => {
     expect(wrapper.text()).toContain('2 个匹配项');
   });
 
-  it('详情读取状态延迟显示并忽略过期响应', async () => {
+  it('切换角色时保留旧详情直到新详情返回，并忽略过期响应', async () => {
     const resolvers: Record<string, (value: Response) => void> = {};
     const host = window as Window &
       typeof globalThis & {
@@ -409,19 +409,22 @@ describe('角色卡管理器组件', () => {
 
     await wrapper.findAll('.cm-card')[0].trigger('click');
     expect(wrapper.text()).not.toContain('正在读取详情');
+    resolvers['慢卡.png']({
+      ok: true,
+      json: async () => ({ data: { name: '慢卡', description: '旧的详情', first_mes: '你好。' } }),
+    } as Response);
+    await vi.waitFor(() => expect(wrapper.text()).toContain('旧的详情'));
+
     await wrapper.findAll('.cm-card')[1].trigger('click');
+    expect(wrapper.text()).toContain('快卡');
+    expect(wrapper.text()).toContain('旧的详情');
+    expect(wrapper.text()).not.toContain('无内容');
 
     resolvers['快卡.png']({
       ok: true,
       json: async () => ({ data: { name: '快卡', description: '新的详情', first_mes: '你好。' } }),
     } as Response);
     await vi.waitFor(() => expect(wrapper.text()).toContain('新的详情'));
-
-    resolvers['慢卡.png']({
-      ok: true,
-      json: async () => ({ data: { name: '慢卡', description: '旧的详情', first_mes: '你好。' } }),
-    } as Response);
-    await Promise.resolve();
 
     expect(wrapper.text()).toContain('新的详情');
     expect(wrapper.text()).not.toContain('旧的详情');
