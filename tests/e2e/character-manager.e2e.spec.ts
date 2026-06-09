@@ -4,6 +4,18 @@ const pageUrl = 'http://127.0.0.1:5500/dist/角色卡管理器预览/index.html'
 const scriptUrl = 'http://127.0.0.1:5500/dist/角色卡管理器/index.js';
 
 test.beforeEach(async ({ page }) => {
+  await page.route(/\/thumbnail\?/, route =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="240"><rect width="180" height="240" fill="#223044"/></svg>',
+    }),
+  );
+  await page.route(/\/characters\//, route =>
+    route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200"><rect width="900" height="1200" fill="#324766"/></svg>',
+    }),
+  );
   await page.addInitScript(() => {
     document.addEventListener('DOMContentLoaded', () => {
       const menu = document.createElement('div');
@@ -36,7 +48,14 @@ test.beforeEach(async ({ page }) => {
       },
     ];
     window.getCharacters = async () => window.characters;
+    window.getThumbnailUrl = (type, file) => `/thumbnail?type=${type}&file=${encodeURIComponent(file)}`;
+    const nativeFetch = window.fetch.bind(window);
+    window.__characterImageRequests = [];
     window.fetch = async (_url, options) => {
+      if (String(_url).startsWith('/characters/')) {
+        window.__characterImageRequests.push(String(_url));
+        return nativeFetch(_url, options);
+      }
       const body = JSON.parse(String(options?.body || '{}'));
       const selected = window.characters.find(character => character.avatar === body.avatar_url);
       if (!selected) {
@@ -66,17 +85,21 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   await page.goto(pageUrl);
 
   await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
-  await expect(page.getByRole('button', { name: /莉莉丝.*莉莉丝\.png/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: /空白卡.*空白卡\.png/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '空白卡' })).toBeVisible();
   await expect(page.getByRole('button', { name: '缺开场白 1' })).toBeVisible();
   await expect
     .poll(async () =>
-      page.locator('.cm-row img').first().evaluate(element => {
+      page.locator('.cm-thumb').first().evaluate(element => {
         const rect = element.getBoundingClientRect();
-        return { height: Math.round(rect.height), width: Math.round(rect.width) };
+        return Math.round((rect.height / rect.width) * 100);
       }),
     )
-    .toEqual({ height: 46, width: 46 });
+    .toBe(133);
+  await expect(page.locator('.cm-card img').first()).toHaveAttribute('src', /^blob:/);
+  await expect(page.evaluate(() => window.__characterImageRequests?.[0])).resolves.toContain('/characters/');
+  await expect(page.locator('.cm-card').first()).not.toContainText('莉莉丝.png');
+  await expect(page.locator('.cm-list-panel')).toHaveCSS('scrollbar-width', 'none');
 
   const bodyText = await page.locator('body').innerText();
   expect(bodyText).toContain('角色卡管理器');
@@ -84,10 +107,10 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   expect(bodyText).not.toContain('????');
 
   await page.getByPlaceholder('名称、作者、文件名、描述').fill('莉莉');
-  await expect(page.getByRole('button', { name: /莉莉丝.*莉莉丝\.png/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
   await expect(page.getByText('空白卡.png')).toHaveCount(0);
 
-  await page.getByRole('button', { name: /莉莉丝.*莉莉丝\.png/ }).click();
+  await page.getByRole('button', { name: '莉莉丝' }).click();
   await expect(page.getByText('夜城里的观察者，负责验证中文 DOM。')).toBeVisible();
   await expect(page.getByText('关联世界书：夜城世界书')).toBeVisible();
 });
@@ -99,7 +122,25 @@ test('移动端宽度下保持单列可读', async ({ page }) => {
   const workspaceColumns = await page.locator('.cm-workspace').evaluate(element => getComputedStyle(element).gridTemplateColumns);
   expect(workspaceColumns.split(' ').length).toBe(1);
   await expect(page.getByText('角色卡管理器')).toBeVisible();
-  await expect(page.getByRole('button', { name: /莉莉丝.*莉莉丝\.png/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
+});
+
+test('左右栏可以收起展开，中间缩略图区域随之扩大', async ({ page }) => {
+  test.skip(test.info().project.name !== 'desktop', '中栏宽度扩展只在桌面三栏布局验证');
+  await page.goto(pageUrl);
+
+  const firstWidth = await page.locator('.cm-list-panel').evaluate(element => Math.round(element.getBoundingClientRect().width));
+  await page.getByTitle('收起左栏').click();
+  await page.getByTitle('收起右栏').click();
+  await expect(page.locator('.cm-workspace')).toHaveClass(/left-collapsed/);
+  await expect(page.locator('.cm-workspace')).toHaveClass(/right-collapsed/);
+  await expect
+    .poll(() => page.locator('.cm-list-panel').evaluate(element => Math.round(element.getBoundingClientRect().width)))
+    .toBeGreaterThan(firstWidth);
+  await page.getByTitle('展开左栏').click();
+  await page.getByTitle('展开右栏').click();
+  await expect(page.locator('.cm-workspace')).not.toHaveClass(/left-collapsed/);
+  await expect(page.locator('.cm-workspace')).not.toHaveClass(/right-collapsed/);
 });
 
 test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面板', async ({ page }) => {
@@ -142,13 +183,13 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
   await expect(managerFrame.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
   await expect
     .poll(async () =>
-      managerFrame.locator('.cm-row img').first().evaluate(element => {
+      managerFrame.locator('.cm-thumb').first().evaluate(element => {
         const rect = element.getBoundingClientRect();
-        return { height: Math.round(rect.height), width: Math.round(rect.width) };
+        return Math.round((rect.height / rect.width) * 100);
       }),
     )
-    .toEqual({ height: 46, width: 46 });
+    .toBe(133);
 
-  await page.getByTitle('关闭角色卡管理器').click();
+  await managerFrame.getByTitle('关闭面板').click();
   await expect(page.locator('#character-card-manager-host-root')).toBeHidden();
 });

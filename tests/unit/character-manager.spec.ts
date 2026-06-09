@@ -2,7 +2,12 @@ import { mount } from '@vue/test-utils';
 import { describe, expect, it, vi } from 'vitest';
 import App from '../../src/角色卡管理器/App.vue';
 import { filterCharacters, sortCharacters } from '../../src/角色卡管理器/filters';
-import { normalizeSummary, readCharacterDetail, readCharacterList } from '../../src/角色卡管理器/host';
+import {
+  loadCharacterOriginalImage,
+  normalizeSummary,
+  readCharacterDetail,
+  readCharacterList,
+} from '../../src/角色卡管理器/host';
 import type { CharacterSummary } from '../../src/角色卡管理器/types';
 
 function makeCharacter(patch: Partial<CharacterSummary> = {}): CharacterSummary {
@@ -10,6 +15,7 @@ function makeCharacter(patch: Partial<CharacterSummary> = {}): CharacterSummary 
     fileName: '莉莉丝.png',
     name: '莉莉丝',
     avatarUrl: '/characters/%E8%8E%89%E8%8E%89%E4%B8%9D.png',
+    avatarFallbackUrls: ['/characters/%E8%8E%89%E8%8E%89%E4%B8%9D.png'],
     fav: false,
     date_added: 100,
     date_last_chat: 20,
@@ -47,6 +53,32 @@ describe('角色卡数据读取与归一化', () => {
     expect(summary.character_book).toBe('雪国世界书');
     expect(summary.altGreetingCount).toBe(2);
     expect(summary.issues.map(issue => issue.message).join('\n')).toContain('关联世界书');
+  });
+
+  it('优先使用角色原图并保留酒馆缩略图兜底', () => {
+    const host = {
+      getThumbnailUrl: vi.fn((type: string, file: string) => `/thumbnail/${type}/${encodeURIComponent(file)}`),
+    } as unknown as Window & typeof globalThis;
+    const summary = normalizeSummary({ avatar: '雪乃.webp', name: '雪乃' }, host);
+
+    expect(summary.avatarUrl).toBe('/characters/%E9%9B%AA%E4%B9%83.webp');
+    expect(summary.avatarFallbackUrls).toContain('/thumbnail/avatar/%E9%9B%AA%E4%B9%83.webp');
+  });
+
+  it('通过宿主 fetch 读取角色原图为 blob URL', async () => {
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:角色原图');
+    const host = {
+      fetch: vi.fn().mockResolvedValue({
+        ok: true,
+        blob: async () => new Blob(['image-bytes'], { type: 'image/png' }),
+      }),
+    } as unknown as Window & typeof globalThis;
+
+    const url = await loadCharacterOriginalImage('雪乃.webp', host);
+
+    expect(host.fetch).toHaveBeenCalledWith('/characters/%E9%9B%AA%E4%B9%83.webp');
+    expect(url).toBe('blob:角色原图');
+    createObjectUrl.mockRestore();
   });
 
   it('宿主 API 缺失时返回可见错误', async () => {
@@ -141,10 +173,33 @@ describe('角色卡管理器组件', () => {
     expect(wrapper.text()).toContain('空白卡');
     expect(wrapper.text()).toContain('缺开场白');
 
-    await wrapper.get('button.cm-row').trigger('click');
+    await wrapper.get('button.cm-card').trigger('click');
     await vi.waitFor(() => expect(wrapper.text()).toContain('她负责验证详情预览。'));
 
     expect(wrapper.text()).toContain('夜城世界书');
     expect(wrapper.text()).not.toContain('??');
+  });
+
+  it('支持左右栏折叠和面板内关闭消息', async () => {
+    const host = window as Window &
+      typeof globalThis & {
+        characters?: unknown[];
+        getCharacters?: () => void;
+      };
+    host.characters = [{ avatar: '莉莉丝.png', name: '莉莉丝', data: { first_mes: '你好。' } }];
+    host.getCharacters = vi.fn();
+    const postMessage = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => undefined);
+
+    const wrapper = mount(App);
+    await vi.waitFor(() => expect(wrapper.text()).toContain('莉莉丝'));
+
+    await wrapper.get('button[title="收起左栏"]').trigger('click');
+    expect(wrapper.find('.cm-workspace').classes()).toContain('left-collapsed');
+    await wrapper.get('button[title="收起右栏"]').trigger('click');
+    expect(wrapper.find('.cm-workspace').classes()).toContain('right-collapsed');
+    await wrapper.get('button[title="关闭面板"]').trigger('click');
+
+    expect(postMessage).toHaveBeenCalledWith({ source: 'character-card-manager', type: 'close' }, '*');
+    postMessage.mockRestore();
   });
 });

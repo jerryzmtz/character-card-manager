@@ -5,6 +5,7 @@ const MANAGER_FRAME_TITLE = '角色卡管理器面板';
 onScriptReady(() => {
   registerScriptButton();
   exposeOpenApi();
+  listenForPanelMessages();
 });
 
 type HelperWindow = Window &
@@ -53,6 +54,13 @@ function openManager() {
   root.style.display = 'grid';
 }
 
+function closeManager() {
+  const root = getHostDocument().getElementById(HOST_ROOT_ID);
+  if (root) {
+    root.style.display = 'none';
+  }
+}
+
 function appendManagerPanel(root: HTMLElement, hostDocument: Document) {
   const panel = hostDocument.createElement('div');
   panel.style.position = 'relative';
@@ -90,9 +98,7 @@ function appendManagerPanel(root: HTMLElement, hostDocument: Document) {
   closeButton.style.color = 'oklch(91% 0.01 248)';
   closeButton.style.fontSize = '22px';
   closeButton.style.cursor = 'pointer';
-  closeButton.addEventListener('click', () => {
-    root.style.display = 'none';
-  });
+  closeButton.addEventListener('click', closeManager);
 
   panel.appendChild(frame);
   panel.appendChild(closeButton);
@@ -124,6 +130,15 @@ function exposeOpenApi() {
   const hostWindow = getHostWindow() as HelperWindow;
   hostWindow.openCharacterCardManager = openManager;
   window.openCharacterCardManager = openManager;
+}
+
+function listenForPanelMessages() {
+  const hostWindow = getHostWindow();
+  hostWindow.addEventListener('message', event => {
+    if (event.data?.source === 'character-card-manager' && event.data?.type === 'close') {
+      closeManager();
+    }
+  });
 }
 
 function getHelperWindow(): HelperWindow {

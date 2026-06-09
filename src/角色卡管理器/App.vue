@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { filterCharacters, getFilterCount, sortCharacters } from './filters';
-import { readCharacterDetail, readCharacterList } from './host';
+import { loadCharacterOriginalImage, readCharacterDetail, readCharacterList } from './host';
 import type { CharacterDetail, CharacterFilter, CharacterSort, CharacterSummary } from './types';
 
 const filters: { id: CharacterFilter; label: string }[] = [
@@ -21,6 +21,11 @@ const query = ref('');
 const activeFilter = ref<CharacterFilter>('all');
 const sortBy = ref<CharacterSort>('date_added');
 const globalIssues = ref<string[]>([]);
+const leftCollapsed = ref(false);
+const rightCollapsed = ref(false);
+const avatarUrlIndex = ref<Record<string, number>>({});
+const originalAvatarUrls = ref<Record<string, string>>({});
+const loadingOriginalAvatars = new Set<string>();
 
 const visibleCharacters = computed(() =>
   sortCharacters(filterCharacters(characters.value, query.value, activeFilter.value), sortBy.value),
@@ -44,6 +49,9 @@ async function refreshList() {
     const result = await readCharacterList();
     characters.value = result.characters;
     globalIssues.value = result.issues.map(issue => issue.message);
+    result.characters.forEach(character => {
+      void loadOriginalAvatar(character);
+    });
     if (!selectedFile.value || !characters.value.some(character => character.fileName === selectedFile.value)) {
       selectedFile.value = characters.value[0]?.fileName || '';
     }
@@ -80,6 +88,53 @@ function truncate(text: string, fallback = '无内容'): string {
   if (!text) return fallback;
   return text.length > 180 ? `${text.slice(0, 180)}...` : text;
 }
+
+function getAvatarSrc(character: CharacterSummary | CharacterDetail): string {
+  const originalUrl = originalAvatarUrls.value[character.fileName];
+  if (originalUrl) return originalUrl;
+
+  const urls = character.avatarFallbackUrls.length ? character.avatarFallbackUrls : [character.avatarUrl];
+  const index = avatarUrlIndex.value[character.fileName] || 0;
+  return urls[Math.min(index, urls.length - 1)] || '';
+}
+
+function handleAvatarError(character: CharacterSummary | CharacterDetail) {
+  const urls = character.avatarFallbackUrls.length ? character.avatarFallbackUrls : [character.avatarUrl];
+  const index = avatarUrlIndex.value[character.fileName] || 0;
+  if (index < urls.length - 1) {
+    avatarUrlIndex.value = {
+      ...avatarUrlIndex.value,
+      [character.fileName]: index + 1,
+    };
+  }
+}
+
+async function loadOriginalAvatar(character: CharacterSummary | CharacterDetail) {
+  if (
+    !character.fileName ||
+    originalAvatarUrls.value[character.fileName] ||
+    loadingOriginalAvatars.has(character.fileName)
+  ) {
+    return;
+  }
+
+  loadingOriginalAvatars.add(character.fileName);
+  try {
+    const url = await loadCharacterOriginalImage(character.fileName);
+    originalAvatarUrls.value = {
+      ...originalAvatarUrls.value,
+      [character.fileName]: url,
+    };
+  } catch {
+    // 继续使用普通 URL 和缩略图兜底。
+  } finally {
+    loadingOriginalAvatars.delete(character.fileName);
+  }
+}
+
+function requestClose() {
+  window.parent?.postMessage({ source: 'character-card-manager', type: 'close' }, '*');
+}
 </script>
 
 <template>
@@ -89,13 +144,39 @@ function truncate(text: string, fallback = '无内容'): string {
         <h1>角色卡管理器</h1>
         <p>{{ characters.length }} 个角色，{{ issueCount }} 条提示</p>
       </div>
-      <button class="cm-icon-button" type="button" title="刷新列表" :disabled="loadingList" @click="refreshList">
-        ↻
-      </button>
+      <div class="cm-header-actions" aria-label="面板操作">
+        <button
+          class="cm-icon-button"
+          type="button"
+          :title="leftCollapsed ? '展开左栏' : '收起左栏'"
+          :aria-pressed="leftCollapsed"
+          @click="leftCollapsed = !leftCollapsed"
+        >
+          ◧
+        </button>
+        <button
+          class="cm-icon-button"
+          type="button"
+          :title="rightCollapsed ? '展开右栏' : '收起右栏'"
+          :aria-pressed="rightCollapsed"
+          @click="rightCollapsed = !rightCollapsed"
+        >
+          ◨
+        </button>
+        <button class="cm-icon-button" type="button" title="刷新列表" :disabled="loadingList" @click="refreshList">
+          ↻
+        </button>
+        <button class="cm-icon-button danger" type="button" title="关闭面板" @click="requestClose">
+          ×
+        </button>
+      </div>
     </header>
 
-    <section class="cm-workspace">
-      <aside class="cm-controls" aria-label="筛选和排序">
+    <section
+      class="cm-workspace"
+      :class="{ 'left-collapsed': leftCollapsed, 'right-collapsed': rightCollapsed }"
+    >
+      <aside class="cm-controls" aria-label="筛选和排序" :aria-hidden="leftCollapsed">
         <label class="cm-field">
           <span>搜索</span>
           <input v-model="query" type="search" placeholder="名称、作者、文件名、描述" />
@@ -129,7 +210,7 @@ function truncate(text: string, fallback = '无内容'): string {
         </div>
       </aside>
 
-      <section class="cm-list-panel" aria-label="角色列表">
+      <section class="cm-list-panel" aria-label="角色缩略图列表">
         <div class="cm-list-head">
           <strong>{{ visibleCharacters.length }} 个匹配项</strong>
           <span v-if="loadingList">正在刷新...</span>
@@ -139,32 +220,35 @@ function truncate(text: string, fallback = '无内容'): string {
           没有匹配的角色卡，调整搜索或刷新列表。
         </div>
 
-        <button
-          v-for="character in visibleCharacters"
-          :key="character.fileName"
-          type="button"
-          class="cm-row"
-          :class="{ active: selectedFile === character.fileName }"
-          @click="selectCharacter(character)"
-        >
-          <img :src="character.avatarUrl" :alt="character.name" loading="lazy" />
-          <span class="cm-row-main">
-            <strong>{{ character.name }}</strong>
-            <small>{{ character.fileName }}</small>
-          </span>
-          <span class="cm-row-tags">
-            <em v-if="character.fav">收藏</em>
-            <em v-if="character.character_book">世界书</em>
-            <em v-if="!character.firstMes" class="warning">缺开场白</em>
-          </span>
-        </button>
+        <div v-else class="cm-card-grid">
+          <button
+            v-for="character in visibleCharacters"
+            :key="character.fileName"
+            type="button"
+            class="cm-card"
+            :class="{ active: selectedFile === character.fileName }"
+            @click="selectCharacter(character)"
+          >
+            <span class="cm-thumb">
+              <img
+                :src="getAvatarSrc(character)"
+                :alt="character.name"
+                loading="lazy"
+                @error="handleAvatarError(character)"
+              />
+            </span>
+            <span class="cm-card-text">
+              <strong>{{ character.name }}</strong>
+            </span>
+          </button>
+        </div>
       </section>
 
-      <section class="cm-preview" aria-label="角色详情预览">
+      <section class="cm-preview" aria-label="角色详情预览" :aria-hidden="rightCollapsed">
         <div v-if="!activePreview" class="cm-empty">请选择一个角色查看详情。</div>
         <template v-else>
           <div class="cm-preview-head">
-            <img :src="activePreview.avatarUrl" :alt="activePreview.name" />
+            <img :src="getAvatarSrc(activePreview)" :alt="activePreview.name" @error="handleAvatarError(activePreview)" />
             <div>
               <h2>{{ activePreview.name }}</h2>
               <p>{{ activePreview.fileName }}</p>
@@ -247,6 +331,12 @@ function truncate(text: string, fallback = '无内容'): string {
   background: var(--cm-panel);
 }
 
+.cm-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .cm-header h1,
 .cm-preview h2,
 .cm-section h3 {
@@ -261,7 +351,6 @@ function truncate(text: string, fallback = '无内容'): string {
 
 .cm-header p,
 .cm-preview p,
-.cm-row small,
 .cm-list-head span {
   color: var(--cm-muted);
 }
@@ -286,6 +375,15 @@ function truncate(text: string, fallback = '无内容'): string {
   opacity: 0.65;
 }
 
+.cm-icon-button[aria-pressed='true'] {
+  border-color: var(--cm-accent);
+  color: oklch(87% 0.06 250);
+}
+
+.cm-icon-button.danger {
+  font-size: 20px;
+}
+
 .cm-workspace {
   display: grid;
   grid-template-columns: minmax(280px, 330px) minmax(320px, 1fr) minmax(320px, 430px);
@@ -293,6 +391,19 @@ function truncate(text: string, fallback = '无内容'): string {
   margin-top: 12px;
   min-height: 0;
   align-items: start;
+  transition: grid-template-columns 160ms ease;
+}
+
+.cm-workspace.left-collapsed {
+  grid-template-columns: 0 minmax(320px, 1fr) minmax(320px, 430px);
+}
+
+.cm-workspace.right-collapsed {
+  grid-template-columns: minmax(280px, 330px) minmax(320px, 1fr) 0;
+}
+
+.cm-workspace.left-collapsed.right-collapsed {
+  grid-template-columns: 0 minmax(320px, 1fr) 0;
 }
 
 .cm-controls,
@@ -309,6 +420,38 @@ function truncate(text: string, fallback = '无内容'): string {
 .cm-preview {
   padding: 12px;
   overflow: auto;
+  transition:
+    opacity 140ms ease,
+    padding 140ms ease,
+    border-width 140ms ease;
+}
+
+.cm-workspace.left-collapsed .cm-controls,
+.cm-workspace.right-collapsed .cm-preview {
+  width: 0;
+  min-width: 0;
+  padding: 0;
+  border-width: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.cm-shell,
+.cm-controls,
+.cm-list-panel,
+.cm-preview {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.cm-shell::-webkit-scrollbar,
+.cm-controls::-webkit-scrollbar,
+.cm-list-panel::-webkit-scrollbar,
+.cm-preview::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .cm-field {
@@ -402,66 +545,62 @@ function truncate(text: string, fallback = '无内容'): string {
   border-bottom: 1px solid var(--cm-border);
 }
 
-.cm-row {
+.cm-card-grid {
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-height: 64px;
-  padding: 8px 12px;
-  border: 0;
-  border-bottom: 1px solid var(--cm-border);
-  background: transparent;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+
+.cm-card {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto 24px;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--cm-bg);
   color: var(--cm-text);
   text-align: left;
   cursor: pointer;
 }
 
-.cm-row.active {
-  background: oklch(28% 0.035 250);
+.cm-card:hover,
+.cm-card.active {
+  border-color: var(--cm-accent);
+  background: oklch(24% 0.025 250);
 }
 
-.cm-row img,
-.cm-preview-head img {
-  width: 46px;
-  height: 46px;
+.cm-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 4;
   border-radius: 6px;
+  overflow: hidden;
+  background: oklch(13% 0.01 248);
+}
+
+.cm-thumb img,
+.cm-preview-head img {
+  width: 100%;
+  height: 100%;
   object-fit: cover;
-  background: var(--cm-bg);
+  image-rendering: auto;
+  background: oklch(13% 0.01 248);
 }
 
-.cm-row-main {
+.cm-card-text {
   min-width: 0;
-  display: grid;
-  gap: 3px;
 }
 
-.cm-row-main strong,
-.cm-row-main small {
+.cm-card-text strong {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.cm-row-tags {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 4px;
-}
-
-.cm-row-tags em {
-  border: 1px solid var(--cm-border);
-  border-radius: 999px;
-  padding: 2px 7px;
-  color: var(--cm-muted);
-  font-style: normal;
-  font-size: 11px;
-}
-
-.cm-row-tags .warning {
-  color: var(--cm-warning);
+  line-height: 24px;
 }
 
 .cm-empty,
@@ -487,6 +626,7 @@ function truncate(text: string, fallback = '无内容'): string {
 .cm-preview-head img {
   width: 58px;
   height: 58px;
+  border-radius: 6px;
 }
 
 .cm-preview-head h2 {
@@ -544,7 +684,7 @@ function truncate(text: string, fallback = '无内容'): string {
     grid-template-columns: minmax(260px, 320px) minmax(320px, 1fr);
   }
 
-  .cm-preview {
+  .cm-workspace:not(.right-collapsed) .cm-preview {
     grid-column: 1 / -1;
   }
 }
@@ -558,13 +698,23 @@ function truncate(text: string, fallback = '无内容'): string {
     grid-template-columns: 1fr;
   }
 
-  .cm-row {
-    grid-template-columns: 42px minmax(0, 1fr);
+  .cm-workspace.left-collapsed,
+  .cm-workspace.right-collapsed,
+  .cm-workspace.left-collapsed.right-collapsed {
+    grid-template-columns: 1fr;
   }
 
-  .cm-row-tags {
-    grid-column: 2;
-    justify-content: flex-start;
+  .cm-header {
+    align-items: flex-start;
+  }
+
+  .cm-header-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .cm-card-grid {
+    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
   }
 
   .cm-meta-grid {

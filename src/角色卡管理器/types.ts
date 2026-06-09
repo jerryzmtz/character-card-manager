@@ -11,6 +11,7 @@ export interface CharacterSummary {
   fileName: string;
   name: string;
   avatarUrl: string;
+  avatarFallbackUrls: string[];
   fav: boolean;
   date_added: number;
   date_last_chat: number;

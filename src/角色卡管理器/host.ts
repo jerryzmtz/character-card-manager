@@ -7,6 +7,7 @@ type HostWindow = Window &
     };
     characters?: TavernCharacter[];
     getCharacters?: () => Promise<unknown> | unknown;
+    getThumbnailUrl?: (type: string, file: string) => string;
   };
 
 interface TavernContext {
@@ -74,7 +75,7 @@ export async function readCharacterList(host: HostWindow = getHostWindow()): Pro
   }
 
   return {
-    characters: source.map(normalizeSummary).filter(Boolean),
+    characters: source.map(character => normalizeSummary(character, host)).filter(Boolean),
     issues,
   };
 }
@@ -96,10 +97,10 @@ export async function readCharacterDetail(
 
     const payload = (await response.json()) as CharacterApiResponse;
     const data = payload.data || payload;
-    return normalizeDetail(fileName, data, payload, base);
+    return normalizeDetail(fileName, data, payload, base, host);
   } catch (error) {
     return {
-      ...(base || normalizeSummary({ avatar: fileName })),
+      ...(base || normalizeSummary({ avatar: fileName }, host)),
       description: '',
       personality: '',
       scenario: '',
@@ -116,16 +117,29 @@ export async function readCharacterDetail(
   }
 }
 
-export function normalizeSummary(raw: TavernCharacter): CharacterSummary {
+export async function loadCharacterOriginalImage(fileName: string, host: HostWindow = getHostWindow()): Promise<string> {
+  if (!fileName || /^(?:https?:|data:|blob:|\/)/i.test(fileName)) return fileName;
+
+  const response = await host.fetch(`/characters/${encodeURIComponent(fileName)}`);
+  if (!response.ok) {
+    throw new Error(`头像原图读取失败：HTTP ${response.status}`);
+  }
+
+  return URL.createObjectURL(await response.blob());
+}
+
+export function normalizeSummary(raw: TavernCharacter, host: HostWindow = getHostWindow()): CharacterSummary {
   const fileName = raw.avatar || raw.file_name || raw.fileName || '';
   const data = raw.data || {};
   const firstMes = stringValue(raw.firstMes || data.first_mes);
   const altGreetings = arrayValue(raw.altGreetings || data.alternate_greetings);
   const characterBook = getBookName(data.character_book || raw.character_book);
+  const avatarFallbackUrls = buildAvatarUrls(fileName, host);
   const summary: CharacterSummary = {
     fileName,
     name: stringValue(raw.name || data.name || stripExtension(fileName) || '未命名角色'),
-    avatarUrl: fileName ? `/characters/${encodeURIComponent(fileName)}` : '',
+    avatarUrl: avatarFallbackUrls[0] || '',
+    avatarFallbackUrls,
     fav: Boolean(raw.fav || data.fav || data.extensions?.fav),
     date_added: numberValue(raw.date_added || raw.create_date || data.create_date),
     date_last_chat: numberValue(raw.date_last_chat || raw.last_chat),
@@ -148,19 +162,23 @@ export function normalizeDetail(
   data: Record<string, any>,
   payload: CharacterApiResponse = {},
   base?: CharacterSummary,
+  host: HostWindow = getHostWindow(),
 ): CharacterDetail {
-  const summary = normalizeSummary({
-    avatar: fileName,
-    name: data.name || base?.name,
-    fav: base?.fav || data.fav,
-    date_added: base?.date_added || data.create_date,
-    date_last_chat: base?.date_last_chat,
-    creator: data.creator || base?.creator,
-    tokens: payload.tokens || data.tokens || base?.tokens,
-    data,
-    character_book: data.character_book || payload.character_book || base?.character_book,
-    character_version: data.character_version || base?.character_version,
-  });
+  const summary = normalizeSummary(
+    {
+      avatar: fileName,
+      name: data.name || base?.name,
+      fav: base?.fav || data.fav,
+      date_added: base?.date_added || data.create_date,
+      date_last_chat: base?.date_last_chat,
+      creator: data.creator || base?.creator,
+      tokens: payload.tokens || data.tokens || base?.tokens,
+      data,
+      character_book: data.character_book || payload.character_book || base?.character_book,
+      character_version: data.character_version || base?.character_version,
+    },
+    host,
+  );
   const detail: CharacterDetail = {
     ...summary,
     description: stringValue(data.description),
@@ -211,6 +229,29 @@ function getBookName(book: unknown): string {
 
 function stripExtension(fileName: string): string {
   return fileName.replace(/\.[^.]+$/, '');
+}
+
+function buildAvatarUrls(fileName: string, host: HostWindow): string[] {
+  if (!fileName) return [];
+  if (/^(?:https?:|data:|blob:|\/)/i.test(fileName)) return [fileName];
+
+  const urls = [
+    `/characters/${encodeURIComponent(fileName)}`,
+    getThumbnailUrl(host, 'avatar', fileName),
+    getThumbnailUrl(host, 'character', fileName),
+    `/thumbnail?type=avatar&file=${encodeURIComponent(fileName)}`,
+    `/thumbnail?type=character&file=${encodeURIComponent(fileName)}`,
+  ].filter((url): url is string => Boolean(url));
+
+  return Array.from(new Set(urls));
+}
+
+function getThumbnailUrl(host: HostWindow, type: string, fileName: string): string {
+  try {
+    return stringValue(host.getThumbnailUrl?.(type, fileName));
+  } catch {
+    return '';
+  }
 }
 
 function stringValue(value: unknown): string {
