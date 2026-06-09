@@ -39,13 +39,15 @@ function openManager() {
 
   const root = hostDocument.createElement('div');
   root.id = HOST_ROOT_ID;
-  root.style.position = 'fixed';
-  root.style.inset = '0';
-  root.style.zIndex = '100000';
-  root.style.boxSizing = 'border-box';
-  root.style.display = 'block';
-  root.style.padding = '0';
-  root.style.background = 'oklch(8% 0.01 248)';
+  applyStyles(root, {
+    position: 'fixed',
+    inset: '0',
+    zIndex: '100000',
+    boxSizing: 'border-box',
+    display: 'block',
+    padding: '0',
+    background: 'oklch(8% 0.01 248)',
+  });
   hostDocument.body.appendChild(root);
   appendManagerPanel(root, hostDocument);
 }
@@ -59,23 +61,27 @@ function closeManager() {
 
 function appendManagerPanel(root: HTMLElement, hostDocument: Document) {
   const panel = hostDocument.createElement('div');
-  panel.style.position = 'relative';
-  panel.style.width = '100vw';
-  panel.style.height = '100vh';
-  panel.style.overflow = 'hidden';
-  panel.style.border = '0';
-  panel.style.borderRadius = '0';
-  panel.style.background = 'oklch(16% 0.012 248)';
+  applyStyles(panel, {
+    position: 'relative',
+    width: '100vw',
+    height: '100vh',
+    overflow: 'hidden',
+    border: '0',
+    borderRadius: '0',
+    background: 'oklch(16% 0.012 248)',
+  });
 
   const frame = hostDocument.createElement('iframe');
   frame.title = MANAGER_FRAME_TITLE;
   const previewUrl = getPreviewUrl();
   frame.src = previewUrl;
-  frame.style.display = 'block';
-  frame.style.width = '100%';
-  frame.style.height = '100%';
-  frame.style.border = '0';
-  frame.style.background = 'oklch(16% 0.012 248)';
+  applyStyles(frame, {
+    display: 'block',
+    width: '100%',
+    height: '100%',
+    border: '0',
+    background: 'oklch(16% 0.012 248)',
+  });
 
   panel.appendChild(frame);
   root.appendChild(panel);
@@ -137,6 +143,10 @@ function getHostWindow(): Window & typeof globalThis {
 
 function getHostDocument(): Document {
   return getHostWindow().document || document;
+}
+
+function applyStyles(element: HTMLElement, styles: Partial<CSSStyleDeclaration>) {
+  Object.assign(element.style, styles);
 }
 
 function getPreviewUrl(): string {

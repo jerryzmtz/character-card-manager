@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
-import { filterCharacters, getFilterCount, sortCharacters } from './filters';
+import { filterCharacters, getFilterCounts, sortCharacters } from './filters';
 import { applyTagMutation, loadCharacterOriginalImage, readCharacterDetail, readCharacterList } from './host';
 import { getTagCounts, previewTagMutation } from './tags';
 import type {
@@ -73,6 +73,7 @@ const visibleCharacters = computed(() =>
 const selectedSummary = computed(() => characters.value.find(character => character.fileName === selectedFile.value));
 const selectedCharacters = computed(() => characters.value.filter(character => selectedFiles.value.has(character.fileName)));
 const selectedFileList = computed(() => selectedCharacters.value.map(character => character.fileName));
+const filterCounts = computed(() => getFilterCounts(characters.value));
 const tagCounts = computed(() => getTagCounts(characters.value));
 const selectedTagDistribution = computed(() =>
   selectedCharacters.value
@@ -249,8 +250,7 @@ function changeCardSize(delta: number) {
 
 function toggleSelectionMode() {
   selectionMode.value = !selectionMode.value;
-  tagPreview.value = null;
-  tagStatus.value = '';
+  clearTagPreview();
   if (!selectionMode.value) {
     selectedFiles.value = new Set();
   }
@@ -264,20 +264,17 @@ function toggleCharacterSelection(fileName: string) {
     next.add(fileName);
   }
   selectedFiles.value = next;
-  tagPreview.value = null;
-  tagStatus.value = '';
+  clearTagPreview();
 }
 
 function selectVisibleCharacters() {
   selectedFiles.value = new Set([...selectedFiles.value, ...visibleCharacters.value.map(character => character.fileName)]);
-  tagPreview.value = null;
-  tagStatus.value = '';
+  clearTagPreview();
 }
 
 function clearSelection() {
   selectedFiles.value = new Set();
-  tagPreview.value = null;
-  tagStatus.value = '';
+  clearTagPreview();
 }
 
 function buildTagDraft() {
@@ -291,6 +288,11 @@ function buildTagDraft() {
 
 function previewTagChanges() {
   tagPreview.value = previewTagMutation(tavernTags.value, tagMap.value, buildTagDraft());
+  tagStatus.value = '';
+}
+
+function clearTagPreview() {
+  tagPreview.value = null;
   tagStatus.value = '';
 }
 
@@ -421,7 +423,7 @@ function requestClose() {
             @click="activateFilter(item.id)"
           >
             <span>{{ item.label }}</span>
-            <strong>{{ getFilterCount(characters, item.id) }}</strong>
+            <strong>{{ filterCounts[item.id] }}</strong>
           </button>
         </div>
 
@@ -566,7 +568,7 @@ function requestClose() {
             <h3>标签操作</h3>
             <label class="cm-field">
               <span>操作</span>
-              <select v-model="tagAction" @change="tagPreview = null">
+              <select v-model="tagAction" @change="clearTagPreview">
                 <option value="add">添加已有标签</option>
                 <option value="remove">移除已有标签</option>
                 <option value="create">新建并绑定</option>
@@ -574,13 +576,13 @@ function requestClose() {
             </label>
             <label v-if="tagAction !== 'create'" class="cm-field">
               <span>标签</span>
-              <select v-model="selectedTagId" @change="tagPreview = null">
+              <select v-model="selectedTagId" @change="clearTagPreview">
                 <option v-for="tag in tavernTags" :key="tag.id" :value="tag.id">{{ tag.name }}</option>
               </select>
             </label>
             <label v-else class="cm-field">
               <span>新标签名称</span>
-              <input v-model="newTagName" type="text" placeholder="例如：待整理" @input="tagPreview = null" />
+              <input v-model="newTagName" type="text" placeholder="例如：待整理" @input="clearTagPreview" />
             </label>
             <button class="cm-primary-action" type="button" :disabled="selectedCharacters.length === 0" @click="previewTagChanges">
               预览变更

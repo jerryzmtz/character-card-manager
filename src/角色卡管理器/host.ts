@@ -141,7 +141,7 @@ export async function applyTagMutation(
   const current = readTavernTags(host);
   const preview = previewTagMutation(current.tags, current.tagMap, draft);
 
-  if (!context || !Array.isArray(context.tags) || !context.tagMap || typeof context.tagMap !== 'object') {
+  if (!isWritableTagContext(context)) {
     return {
       success: false,
       message: '酒馆标签上下文不可用，无法保存标签变更。',
@@ -163,12 +163,7 @@ export async function applyTagMutation(
 
   const updated = buildUpdatedTagState(current.tags, current.tagMap, preview);
   context.tags.splice(0, context.tags.length, ...updated.tags);
-  Object.keys(context.tagMap).forEach(fileName => {
-    delete context.tagMap![fileName];
-  });
-  Object.entries(updated.tagMap).forEach(([fileName, ids]) => {
-    context.tagMap![fileName] = ids;
-  });
+  replaceTagMap(context.tagMap, updated.tagMap);
 
   try {
     await context.saveSettingsDebounced?.();
@@ -331,6 +326,21 @@ function getContext(host: HostWindow): TavernContext | undefined {
   } catch {
     return undefined;
   }
+}
+
+function isWritableTagContext(
+  context: TavernContext | undefined,
+): context is TavernContext & { tags: unknown[]; tagMap: Record<string, string[]> } {
+  return Boolean(context && Array.isArray(context.tags) && context.tagMap && typeof context.tagMap === 'object');
+}
+
+function replaceTagMap(target: Record<string, string[]>, source: Record<string, string[]>) {
+  Object.keys(target).forEach(fileName => {
+    delete target[fileName];
+  });
+  Object.entries(source).forEach(([fileName, ids]) => {
+    target[fileName] = ids;
+  });
 }
 
 function getBookName(book: unknown): string {

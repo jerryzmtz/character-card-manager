@@ -29,6 +29,27 @@ export function getFilterCount(characters: CharacterSummary[], filter: Character
   return characters.filter(character => matchesFilter(character, filter)).length;
 }
 
+export function getFilterCounts(characters: CharacterSummary[]): Record<CharacterFilter, number> {
+  const counts: Record<CharacterFilter, number> = {
+    all: characters.length,
+    favorite: 0,
+    worldBook: 0,
+    missingGreeting: 0,
+    untagged: 0,
+    error: 0,
+  };
+
+  characters.forEach(character => {
+    if (matchesFilter(character, 'favorite')) counts.favorite += 1;
+    if (matchesFilter(character, 'worldBook')) counts.worldBook += 1;
+    if (matchesFilter(character, 'missingGreeting')) counts.missingGreeting += 1;
+    if (matchesFilter(character, 'untagged')) counts.untagged += 1;
+    if (matchesFilter(character, 'error')) counts.error += 1;
+  });
+
+  return counts;
+}
+
 function matchesFilter(character: CharacterSummary, filter: CharacterFilter): boolean {
   if (filter === 'favorite') return character.fav;
   if (filter === 'worldBook') return Boolean(character.character_book);

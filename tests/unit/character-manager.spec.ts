@@ -1,7 +1,7 @@
 import { mount } from '@vue/test-utils';
 import { describe, expect, it, vi } from 'vitest';
 import App from '../../src/角色卡管理器/App.vue';
-import { filterCharacters, sortCharacters } from '../../src/角色卡管理器/filters';
+import { filterCharacters, getFilterCounts, sortCharacters } from '../../src/角色卡管理器/filters';
 import {
   applyTagMutation,
   loadCharacterOriginalImage,
@@ -162,6 +162,17 @@ describe('搜索、排序和筛选', () => {
     expect(filterCharacters(characters, '', 'all', ['整理'])).toHaveLength(1);
     expect(filterCharacters(characters, '', 'all', ['整理', '日文'], 'or')).toHaveLength(2);
     expect(filterCharacters(characters, '', 'all', ['整理', '日文'], 'and')).toHaveLength(1);
+  });
+
+  it('一次性统计各筛选项数量', () => {
+    expect(getFilterCounts(characters)).toEqual({
+      all: 3,
+      favorite: 1,
+      worldBook: 1,
+      missingGreeting: 1,
+      untagged: 1,
+      error: 1,
+    });
   });
 
   it('按导入时间倒序，按名称正序', () => {
