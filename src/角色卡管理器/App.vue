@@ -17,13 +17,9 @@ import type {
 const DETAIL_LOADING_DELAY_MS = 180;
 const TAG_FILTER_MODE_KEY = 'character-card-manager:tag-filter-mode';
 
-const filters: { id: CharacterFilter; label: string }[] = [
+const sideFilters: { id: CharacterFilter; label: string }[] = [
   { id: 'all', label: '全部' },
-  { id: 'favorite', label: '收藏' },
-  { id: 'worldBook', label: '世界书' },
-  { id: 'missingGreeting', label: '缺开场白' },
-  { id: 'untagged', label: '未打标签' },
-  { id: 'error', label: '读取异常' },
+  { id: 'untagged', label: '无标签' },
 ];
 
 const characters = ref<CharacterSummary[]>([]);
@@ -148,7 +144,7 @@ async function refreshList() {
 
 function activateFilter(filter: CharacterFilter) {
   activeFilter.value = filter;
-  if (filter !== 'all') activeTagIds.value = [];
+  activeTagIds.value = [];
 }
 
 function activateTagFilter(tagId: string) {
@@ -156,6 +152,11 @@ function activateTagFilter(tagId: string) {
     ? activeTagIds.value.filter(id => id !== tagId)
     : [...activeTagIds.value, tagId];
   if (activeTagIds.value.length > 0) activeFilter.value = 'all';
+}
+
+function clearTagFilters() {
+  activeTagIds.value = [];
+  activeFilter.value = 'all';
 }
 
 async function selectCharacter(character: CharacterSummary) {
@@ -368,24 +369,6 @@ function requestClose() {
         >
           ⚙
         </button>
-        <button
-          class="cm-icon-button"
-          type="button"
-          :title="leftCollapsed ? '展开左栏' : '收起左栏'"
-          :aria-pressed="leftCollapsed"
-          @click="leftCollapsed = !leftCollapsed"
-        >
-          ◧
-        </button>
-        <button
-          class="cm-icon-button"
-          type="button"
-          :title="rightCollapsed ? '展开右栏' : '收起右栏'"
-          :aria-pressed="rightCollapsed"
-          @click="rightCollapsed = !rightCollapsed"
-        >
-          ◨
-        </button>
         <button class="cm-icon-button" type="button" title="刷新列表" :disabled="loadingList" @click="refreshList">
           ↻
         </button>
@@ -399,38 +382,32 @@ function requestClose() {
       class="cm-workspace"
       :class="{ 'left-collapsed': leftCollapsed, 'right-collapsed': rightCollapsed }"
     >
-      <aside class="cm-controls" aria-label="筛选和排序" :aria-hidden="leftCollapsed">
-        <label class="cm-field">
-          <span>搜索</span>
-          <input v-model="query" type="search" placeholder="名称、作者、文件名、描述" />
-        </label>
-
-        <label class="cm-field">
-          <span>排序</span>
-          <select v-model="sortBy">
-            <option value="date_added">导入时间</option>
-            <option value="date_last_chat">最后聊天</option>
-            <option value="name">名称</option>
-          </select>
-        </label>
-
-        <div class="cm-filter-list" role="tablist" aria-label="角色筛选">
+      <aside class="cm-controls" aria-label="标签筛选和读取提示" :aria-hidden="leftCollapsed">
+        <section class="cm-tag-filter" aria-label="标签筛选">
+          <div class="cm-side-heading">
+            <strong>标签</strong>
+            <button
+              class="cm-clear-tags"
+              type="button"
+              title="清空已选标签"
+              aria-label="清空已选标签"
+              :disabled="activeTagIds.length === 0 && activeFilter === 'all'"
+              @click="clearTagFilters"
+            >
+              ⌫
+            </button>
+          </div>
           <button
-            v-for="item in filters"
+            v-for="item in sideFilters"
             :key="item.id"
             type="button"
-            :class="{ active: activeFilter === item.id }"
+            :class="{ active: activeFilter === item.id && activeTagIds.length === 0 }"
+            :aria-pressed="activeFilter === item.id && activeTagIds.length === 0"
             @click="activateFilter(item.id)"
           >
             <span>{{ item.label }}</span>
             <strong>{{ filterCounts[item.id] }}</strong>
           </button>
-        </div>
-
-        <section class="cm-tag-filter" aria-label="标签筛选">
-          <div class="cm-side-heading">
-            <strong>标签</strong>
-          </div>
           <div v-if="tavernTags.length === 0" class="cm-side-empty">暂无酒馆标签</div>
           <button
             v-for="tag in tavernTags"
@@ -441,7 +418,6 @@ function requestClose() {
             @click="activateTagFilter(tag.id)"
           >
             <span>
-              <i :style="{ background: tag.color || 'oklch(62% 0.16 250)' }"></i>
               {{ tag.name }}
             </span>
             <strong>{{ tagCounts[tag.id] || 0 }}</strong>
@@ -454,10 +430,33 @@ function requestClose() {
         </div>
       </aside>
 
+      <button
+        class="cm-panel-toggle left"
+        type="button"
+        :title="leftCollapsed ? '展开左栏' : '收起左栏'"
+        :aria-label="leftCollapsed ? '展开左栏' : '收起左栏'"
+        :aria-pressed="leftCollapsed"
+        @click="leftCollapsed = !leftCollapsed"
+      ></button>
+
       <section class="cm-list-panel" aria-label="角色缩略图列表">
         <div class="cm-list-head">
-          <strong>{{ visibleCharacters.length }} 个匹配项</strong>
-          <span v-if="loadingList">正在刷新...</span>
+          <div class="cm-list-status">
+            <strong>{{ visibleCharacters.length }} 个匹配项</strong>
+            <span v-if="loadingList">正在刷新...</span>
+          </div>
+          <label class="cm-field cm-search-field">
+            <span>搜索</span>
+            <input v-model="query" type="search" placeholder="名称、作者、文件名、描述" />
+          </label>
+          <label class="cm-field cm-sort-field">
+            <span>排序</span>
+            <select v-model="sortBy">
+              <option value="date_added">导入时间</option>
+              <option value="date_last_chat">最后聊天</option>
+              <option value="name">名称</option>
+            </select>
+          </label>
           <div class="cm-list-tools">
             <button
               class="cm-selection-toggle"
@@ -532,13 +531,19 @@ function requestClose() {
             </span>
             <span class="cm-card-text">
               <strong>{{ character.name }}</strong>
-              <small v-if="character.tags.length">
-                {{ character.tags.slice(0, 2).map(tag => tag.name).join('、') }}
-              </small>
             </span>
           </article>
         </div>
       </section>
+
+      <button
+        class="cm-panel-toggle right"
+        type="button"
+        :title="rightCollapsed ? '展开右栏' : '收起右栏'"
+        :aria-label="rightCollapsed ? '展开右栏' : '收起右栏'"
+        :aria-pressed="rightCollapsed"
+        @click="rightCollapsed = !rightCollapsed"
+      ></button>
 
       <section class="cm-preview" aria-label="角色详情预览" :aria-hidden="rightCollapsed">
         <template v-if="showSelectionSummary">
@@ -817,8 +822,11 @@ function requestClose() {
 }
 
 .cm-workspace {
+  --cm-left-rail-width: 240px;
+  --cm-right-rail-width: 360px;
   display: grid;
-  grid-template-columns: minmax(260px, 300px) minmax(420px, 1fr) minmax(300px, 360px);
+  position: relative;
+  grid-template-columns: minmax(210px, 240px) minmax(480px, 1fr) minmax(300px, 360px);
   gap: 12px;
   margin-top: 12px;
   min-height: 0;
@@ -827,15 +835,92 @@ function requestClose() {
 }
 
 .cm-workspace.left-collapsed {
-  grid-template-columns: 0 minmax(420px, 1fr) minmax(300px, 360px);
+  grid-template-columns: 0 minmax(480px, 1fr) minmax(300px, 360px);
 }
 
 .cm-workspace.right-collapsed {
-  grid-template-columns: minmax(260px, 300px) minmax(420px, 1fr) 0;
+  grid-template-columns: minmax(210px, 240px) minmax(480px, 1fr) 0;
 }
 
 .cm-workspace.left-collapsed.right-collapsed {
-  grid-template-columns: 0 minmax(420px, 1fr) 0;
+  grid-template-columns: 0 minmax(480px, 1fr) 0;
+}
+
+.cm-panel-toggle {
+  position: absolute;
+  top: 50%;
+  z-index: 3;
+  width: 22px;
+  height: 72px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: oklch(78% 0.018 248 / 54%);
+  cursor: pointer;
+  opacity: 0.58;
+  transform: translateY(-50%);
+  transition:
+    opacity 140ms ease,
+    background 140ms ease,
+    color 140ms ease,
+    left 160ms ease,
+    right 160ms ease;
+}
+
+.cm-panel-toggle:hover,
+.cm-panel-toggle:focus-visible {
+  background: oklch(92% 0.01 248 / 8%);
+  color: oklch(88% 0.025 248 / 82%);
+  opacity: 1;
+}
+
+.cm-panel-toggle:focus-visible {
+  outline: 1px solid var(--cm-accent);
+  outline-offset: 2px;
+}
+
+.cm-panel-toggle::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-top: 9px solid transparent;
+  border-bottom: 9px solid transparent;
+}
+
+.cm-panel-toggle.left {
+  left: calc(var(--cm-left-rail-width) + 1px);
+}
+
+.cm-panel-toggle.left::before {
+  border-right: 9px solid currentColor;
+}
+
+.cm-workspace.left-collapsed .cm-panel-toggle.left {
+  left: 1px;
+}
+
+.cm-workspace.left-collapsed .cm-panel-toggle.left::before {
+  border-right: 0;
+  border-left: 9px solid currentColor;
+}
+
+.cm-panel-toggle.right {
+  right: calc(var(--cm-right-rail-width) + 1px);
+}
+
+.cm-panel-toggle.right::before {
+  border-left: 9px solid currentColor;
+}
+
+.cm-workspace.right-collapsed .cm-panel-toggle.right {
+  right: 1px;
+}
+
+.cm-workspace.right-collapsed .cm-panel-toggle.right::before {
+  border-left: 0;
+  border-right: 9px solid currentColor;
 }
 
 .cm-controls,
@@ -910,16 +995,13 @@ function requestClose() {
   padding: 0 10px;
 }
 
-.cm-filter-list,
 .cm-tag-filter {
   display: grid;
   gap: 6px;
 }
 
 .cm-tag-filter {
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--cm-border);
+  margin-top: 0;
 }
 
 .cm-side-heading {
@@ -931,13 +1013,43 @@ function requestClose() {
   font-size: 12px;
 }
 
+.cm-tag-filter .cm-clear-tags {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--cm-weak);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.cm-tag-filter .cm-clear-tags:hover:not(:disabled),
+.cm-tag-filter .cm-clear-tags:focus-visible {
+  background: var(--cm-panel-2);
+  color: var(--cm-text);
+}
+
+.cm-tag-filter .cm-clear-tags:focus-visible {
+  outline: 1px solid var(--cm-accent);
+  outline-offset: 2px;
+}
+
+.cm-tag-filter .cm-clear-tags:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
 .cm-side-empty {
   color: var(--cm-weak);
   font-size: 12px;
   line-height: 1.5;
 }
 
-.cm-filter-list button,
 .cm-tag-filter button {
   display: flex;
   justify-content: space-between;
@@ -954,7 +1066,6 @@ function requestClose() {
   gap: 8px;
 }
 
-.cm-filter-list button.active,
 .cm-tag-filter button.active {
   border-color: var(--cm-accent);
   color: oklch(87% 0.06 250);
@@ -964,20 +1075,11 @@ function requestClose() {
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.cm-tag-filter i {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.cm-filter-list strong,
 .cm-tag-filter strong {
   color: var(--cm-muted);
   font-size: 12px;
@@ -1019,10 +1121,53 @@ function requestClose() {
 .cm-list-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  flex-wrap: nowrap;
   gap: 10px;
   padding: 11px 12px;
   border-bottom: 1px solid var(--cm-border);
+  overflow: hidden;
+}
+
+.cm-list-status {
+  flex: 0 0 auto;
+  min-width: 110px;
+  display: grid;
+  gap: 2px;
+}
+
+.cm-list-status span {
+  color: var(--cm-muted);
+  font-size: 12px;
+}
+
+.cm-search-field,
+.cm-sort-field {
+  margin-bottom: 0;
+}
+
+.cm-list-head .cm-field {
+  display: block;
+}
+
+.cm-list-head .cm-field > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.cm-search-field {
+  flex: 1 1 260px;
+  min-width: 180px;
+}
+
+.cm-sort-field {
+  flex: 0 0 150px;
 }
 
 .cm-list-head > span {
@@ -1030,7 +1175,7 @@ function requestClose() {
 }
 
 .cm-list-tools {
-  min-width: 0;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -1214,16 +1359,6 @@ function requestClose() {
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 24px;
-}
-
-.cm-card-text small {
-  display: block;
-  margin-top: -3px;
-  overflow: hidden;
-  color: var(--cm-weak);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .cm-empty,
@@ -1493,7 +1628,8 @@ function requestClose() {
 
 @media (max-width: 1080px) {
   .cm-workspace {
-    grid-template-columns: minmax(260px, 320px) minmax(320px, 1fr);
+    --cm-left-rail-width: 230px;
+    grid-template-columns: minmax(200px, 230px) minmax(320px, 1fr);
   }
 
   .cm-workspace:not(.right-collapsed) .cm-preview {
@@ -1508,6 +1644,10 @@ function requestClose() {
 
   .cm-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .cm-panel-toggle {
+    display: none;
   }
 
   .cm-workspace.left-collapsed,
@@ -1527,6 +1667,18 @@ function requestClose() {
 
   .cm-card-grid {
     grid-template-columns: repeat(auto-fill, minmax(min(var(--cm-card-min, 168px), 100%), 1fr));
+  }
+
+  .cm-list-head {
+    flex-wrap: wrap;
+  }
+
+  .cm-list-status,
+  .cm-search-field,
+  .cm-sort-field,
+  .cm-list-tools,
+  .cm-gallery-tools {
+    flex: 1 1 100%;
   }
 
   .cm-meta-list {

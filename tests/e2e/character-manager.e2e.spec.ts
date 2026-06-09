@@ -107,8 +107,10 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
   await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
   await expect(page.getByRole('button', { name: '空白卡' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '全部 2' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '无标签 1' })).toBeVisible();
   await expect(page.getByRole('button', { name: '待整理 1' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '缺开场白 1' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '缺开场白 1' })).toHaveCount(0);
   await expect
     .poll(async () =>
       page.locator('.cm-thumb img').first().evaluate(element => {
@@ -120,6 +122,8 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   await expect(page.locator('.cm-card img').first()).toHaveAttribute('src', /^blob:/);
   await expect(page.evaluate(() => window.__characterImageRequests?.[0])).resolves.toContain('/characters/');
   await expect(page.locator('.cm-card').first()).not.toContainText('莉莉丝.png');
+  await expect(page.locator('.cm-card-text').first()).toHaveText('莉莉丝');
+  await expect(page.locator('.cm-card-text').first()).not.toContainText('待整理');
   await expect(page.locator('.cm-list-panel')).toHaveCSS('scrollbar-width', 'none');
 
   const bodyText = await page.locator('body').innerText();
@@ -163,6 +167,19 @@ test('批量选择会先预览再写入酒馆标签且不调用危险接口', as
 
 test('标签筛选支持多选切换，并可在设置里切换或且逻辑', async ({ page }) => {
   await page.goto(pageUrl);
+
+  await expect(page.locator('.cm-controls')).not.toContainText('排序');
+  await expect(page.locator('.cm-list-panel')).toContainText('排序');
+  await expect(page.locator('.cm-list-panel .cm-filter-list')).toHaveCount(0);
+  await expect(page.locator('.cm-tag-filter i')).toHaveCount(0);
+  await expect(page.getByTitle('清空已选标签')).toBeDisabled();
+
+  await page.getByRole('button', { name: '待整理 1' }).click();
+  await expect(page.getByText('1 个匹配项')).toBeVisible();
+  await expect(page.getByTitle('清空已选标签')).toBeEnabled();
+  await page.getByTitle('清空已选标签').click();
+  await expect(page.getByText('2 个匹配项')).toBeVisible();
+  await expect(page.getByTitle('清空已选标签')).toBeDisabled();
 
   await page.getByRole('button', { name: '待整理 1' }).click();
   await expect(page.getByText('1 个匹配项')).toBeVisible();

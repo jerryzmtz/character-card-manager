@@ -303,7 +303,9 @@ describe('角色卡管理器组件', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('莉莉丝'));
 
     expect(wrapper.text()).toContain('空白卡');
-    expect(wrapper.text()).toContain('缺开场白');
+    expect(wrapper.text()).toContain('无标签');
+    expect(wrapper.findAll('.cm-card-text')[0].text()).toBe('莉莉丝');
+    expect(wrapper.findAll('.cm-card-text')[0].text()).not.toContain('待整理');
 
     await wrapper.get('.cm-card').trigger('click');
     await vi.waitFor(() => expect(wrapper.text()).toContain('她负责验证详情预览。'));
@@ -376,19 +378,62 @@ describe('角色卡管理器组件', () => {
     const wrapper = mount(App);
     await vi.waitFor(() => expect(wrapper.text()).toContain('开放角色'));
 
+    expect(wrapper.get('button[title="清空已选标签"]').attributes('disabled')).toBeDefined();
     const tagButtons = () => wrapper.findAll('.cm-tag-filter > button');
-    await tagButtons()[0].trigger('click');
+    await tagButtons()[2].trigger('click');
     expect(wrapper.text()).toContain('2 个匹配项');
-    await tagButtons()[1].trigger('click');
+    expect(wrapper.get('button[title="清空已选标签"]').attributes('disabled')).toBeUndefined();
+    await tagButtons()[3].trigger('click');
     expect(wrapper.text()).toContain('3 个匹配项');
+    await wrapper.get('button[title="清空已选标签"]').trigger('click');
+    expect(wrapper.text()).toContain('3 个匹配项');
+    expect(wrapper.get('button[title="清空已选标签"]').attributes('disabled')).toBeDefined();
+
+    await tagButtons()[2].trigger('click');
+    await tagButtons()[3].trigger('click');
 
     await wrapper.get('button[title="设置"]').trigger('click');
     expect(wrapper.text()).toContain('标签过滤逻辑');
     await wrapper.findAll('.cm-segmented button')[1].trigger('click');
     expect(wrapper.text()).toContain('1 个匹配项');
 
-    await tagButtons()[1].trigger('click');
+    await tagButtons()[3].trigger('click');
     expect(wrapper.text()).toContain('2 个匹配项');
+  });
+
+  it('把全部和无标签并入左侧标签栏，中栏只保留一行工具', async () => {
+    const context = {
+      characters: [
+        { avatar: '莉莉丝.png', name: '莉莉丝', date_added: 100, data: { first_mes: '你好。' } },
+        { avatar: '空白卡.png', name: '空白卡', date_added: 200, data: { first_mes: '你好。' } },
+      ],
+      tags: [{ id: '整理', name: '待整理', color: '#5599ff' }],
+      tagMap: { '莉莉丝.png': ['整理'], '空白卡.png': [] },
+    };
+    const host = window as Window &
+      typeof globalThis & {
+        SillyTavern?: unknown;
+        characters?: unknown[];
+      };
+    host.SillyTavern = { getContext: () => context };
+    host.characters = context.characters;
+
+    const wrapper = mount(App);
+    await vi.waitFor(() => expect(wrapper.text()).toContain('莉莉丝'));
+
+    expect(wrapper.find('.cm-controls select').exists()).toBe(false);
+    expect(wrapper.find('.cm-list-panel select').exists()).toBe(true);
+    expect(wrapper.find('.cm-list-panel .cm-filter-list').exists()).toBe(false);
+    expect(wrapper.find('.cm-tag-filter').text()).toContain('全部');
+    expect(wrapper.find('.cm-tag-filter').text()).toContain('无标签');
+    expect(wrapper.find('.cm-tag-filter').text()).toContain('待整理');
+    expect(wrapper.find('.cm-tag-filter i').exists()).toBe(false);
+
+    const tagButtons = () => wrapper.findAll('.cm-tag-filter > button');
+    await tagButtons()[1].trigger('click');
+    expect(wrapper.text()).toContain('1 个匹配项');
+    await tagButtons()[2].trigger('click');
+    expect(wrapper.text()).toContain('1 个匹配项');
   });
 
   it('切换角色时保留旧详情直到新详情返回，并忽略过期响应', async () => {
