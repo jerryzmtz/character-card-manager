@@ -96,6 +96,20 @@ const detailPreview = computed(() => {
   return selectedDetail.value || activePreview.value;
 });
 const previewRiskIssues = computed(() => detailPreview.value?.issues.filter(issue => issue.level !== 'info') || []);
+const previewDescription = computed(() => {
+  if (!detailPreview.value) return '';
+  return 'description' in detailPreview.value ? detailPreview.value.description : detailPreview.value.desc;
+});
+const previewFirstMessage = computed(() => {
+  if (!detailPreview.value) return '';
+  return 'first_mes' in detailPreview.value ? detailPreview.value.first_mes : detailPreview.value.firstMes;
+});
+const previewAltGreetingCount = computed(() => {
+  if (!detailPreview.value) return 0;
+  return 'alternate_greetings' in detailPreview.value
+    ? detailPreview.value.alternate_greetings.length
+    : detailPreview.value.altGreetingCount;
+});
 const cardSize = computed(() => cardSizes[cardSizeIndex.value]);
 const cardGridStyle = computed(() => ({ '--cm-card-min': `${cardSize.value.width}px` }));
 
@@ -125,7 +139,6 @@ async function refreshList() {
     });
     if (!selectedFile.value || !characters.value.some(character => character.fileName === selectedFile.value)) {
       selectedFile.value = characters.value[0]?.fileName || '';
-      selectedDetail.value = null;
     }
   } finally {
     loadingList.value = false;
@@ -208,21 +221,6 @@ function formatDate(timestamp: number): string {
 function truncate(text: string, fallback = '无内容', maxLength = 140): string {
   if (!text) return fallback;
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
-}
-
-function getPreviewDescription(preview: CharacterSummary | CharacterDetail | null): string {
-  if (!preview) return '';
-  return 'description' in preview ? preview.description : preview.desc;
-}
-
-function getPreviewFirstMessage(preview: CharacterSummary | CharacterDetail | null): string {
-  if (!preview) return '';
-  return 'first_mes' in preview ? preview.first_mes : preview.firstMes;
-}
-
-function getPreviewAltGreetingCount(preview: CharacterSummary | CharacterDetail | null): number {
-  if (!preview) return 0;
-  return 'alternate_greetings' in preview ? preview.alternate_greetings.length : preview.altGreetingCount;
 }
 
 function getAvatarSrc(character: CharacterSummary | CharacterDetail): string {
@@ -667,17 +665,17 @@ function requestClose() {
 
           <article class="cm-section">
             <h3>描述</h3>
-            <p>{{ truncate(getPreviewDescription(detailPreview), '无内容', 160) }}</p>
+            <p>{{ truncate(previewDescription, '无内容', 160) }}</p>
           </article>
 
           <article class="cm-section">
             <h3>主开场白</h3>
-            <p>{{ truncate(getPreviewFirstMessage(detailPreview), '无内容', 160) }}</p>
+            <p>{{ truncate(previewFirstMessage, '无内容', 160) }}</p>
           </article>
 
           <article class="cm-section">
             <h3>备选开场白</h3>
-            <p>{{ getPreviewAltGreetingCount(detailPreview) }} 条</p>
+            <p>{{ previewAltGreetingCount }} 条</p>
           </article>
         </template>
       </section>
