@@ -148,9 +148,13 @@ function activateFilter(filter: CharacterFilter) {
 }
 
 function activateTagFilter(tagId: string) {
-  activeTagIds.value = activeTagIds.value.includes(tagId)
-    ? activeTagIds.value.filter(id => id !== tagId)
-    : [...activeTagIds.value, tagId];
+  if (tagFilterMode.value === 'exclusive') {
+    activeTagIds.value = activeTagIds.value.includes(tagId) ? [] : [tagId];
+  } else {
+    activeTagIds.value = activeTagIds.value.includes(tagId)
+      ? activeTagIds.value.filter(id => id !== tagId)
+      : [...activeTagIds.value, tagId];
+  }
   if (activeTagIds.value.length > 0) activeFilter.value = 'all';
 }
 
@@ -185,6 +189,9 @@ async function selectCharacter(character: CharacterSummary) {
 
 function setTagFilterMode(mode: TagFilterMode) {
   tagFilterMode.value = mode;
+  if (mode === 'exclusive' && activeTagIds.value.length > 1) {
+    activeTagIds.value = activeTagIds.value.slice(0, 1);
+  }
   try {
     localStorage.setItem(TAG_FILTER_MODE_KEY, mode);
   } catch {
@@ -201,9 +208,10 @@ function clearDetailLoadingTimer() {
 
 function readStoredTagFilterMode(): TagFilterMode {
   try {
-    return localStorage.getItem(TAG_FILTER_MODE_KEY) === 'and' ? 'and' : 'or';
+    const stored = localStorage.getItem(TAG_FILTER_MODE_KEY);
+    return stored === 'or' || stored === 'and' ? stored : 'exclusive';
   } catch {
-    return 'or';
+    return 'exclusive';
   }
 }
 
@@ -701,9 +709,18 @@ function requestClose() {
         <article class="cm-settings-group">
           <div>
             <h3>标签过滤逻辑</h3>
-            <p>选择多个标签时，决定角色需要命中任意标签还是全部标签。</p>
+            <p>默认只保留一个标签选择，需要组合筛选时可切换为或/且。</p>
           </div>
           <div class="cm-segmented" role="radiogroup" aria-label="标签过滤逻辑">
+            <button
+              type="button"
+              role="radio"
+              :aria-checked="tagFilterMode === 'exclusive'"
+              :class="{ active: tagFilterMode === 'exclusive' }"
+              @click="setTagFilterMode('exclusive')"
+            >
+              单选
+            </button>
             <button
               type="button"
               role="radio"

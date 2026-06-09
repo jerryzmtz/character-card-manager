@@ -5,7 +5,7 @@ export function filterCharacters(
   query: string,
   filter: CharacterFilter,
   activeTagIds: string[] = [],
-  tagFilterMode: TagFilterMode = 'or',
+  tagFilterMode: TagFilterMode = 'exclusive',
 ): CharacterSummary[] {
   const keyword = query.trim().toLocaleLowerCase('zh-CN');
   return characters.filter(character => {
@@ -61,6 +61,9 @@ function matchesFilter(character: CharacterSummary, filter: CharacterFilter): bo
 
 function matchesTags(character: CharacterSummary, activeTagIds: string[], tagFilterMode: TagFilterMode): boolean {
   if (activeTagIds.length === 0) return true;
+  if (tagFilterMode === 'exclusive') {
+    return character.tagIds.includes(activeTagIds[0]);
+  }
   if (tagFilterMode === 'and') {
     return activeTagIds.every(id => character.tagIds.includes(id));
   }

@@ -160,6 +160,7 @@ describe('搜索、排序和筛选', () => {
     expect(filterCharacters(characters, '', 'untagged')).toHaveLength(1);
     expect(filterCharacters(characters, '', 'error')).toHaveLength(1);
     expect(filterCharacters(characters, '', 'all', ['整理'])).toHaveLength(1);
+    expect(filterCharacters(characters, '', 'all', ['整理', '日文'])).toHaveLength(1);
     expect(filterCharacters(characters, '', 'all', ['整理', '日文'], 'or')).toHaveLength(2);
     expect(filterCharacters(characters, '', 'all', ['整理', '日文'], 'and')).toHaveLength(1);
   });
@@ -353,7 +354,7 @@ describe('角色卡管理器组件', () => {
     expect(wrapper.text()).toContain('0 已选');
   });
 
-  it('支持标签多选、默认或逻辑和设置中的且逻辑', async () => {
+  it('默认单选标签，并支持在设置中切换或/且逻辑', async () => {
     const context = {
       characters: [
         { avatar: '开放.png', name: '开放角色', data: { first_mes: '你好。' } },
@@ -384,17 +385,19 @@ describe('角色卡管理器组件', () => {
     expect(wrapper.text()).toContain('2 个匹配项');
     expect(wrapper.get('button[title="清空已选标签"]').attributes('disabled')).toBeUndefined();
     await tagButtons()[3].trigger('click');
-    expect(wrapper.text()).toContain('3 个匹配项');
+    expect(wrapper.text()).toContain('2 个匹配项');
     await wrapper.get('button[title="清空已选标签"]').trigger('click');
     expect(wrapper.text()).toContain('3 个匹配项');
     expect(wrapper.get('button[title="清空已选标签"]').attributes('disabled')).toBeDefined();
 
-    await tagButtons()[2].trigger('click');
     await tagButtons()[3].trigger('click');
 
     await wrapper.get('button[title="设置"]').trigger('click');
     expect(wrapper.text()).toContain('标签过滤逻辑');
     await wrapper.findAll('.cm-segmented button')[1].trigger('click');
+    await tagButtons()[2].trigger('click');
+    expect(wrapper.text()).toContain('3 个匹配项');
+    await wrapper.findAll('.cm-segmented button')[2].trigger('click');
     expect(wrapper.text()).toContain('1 个匹配项');
 
     await tagButtons()[3].trigger('click');

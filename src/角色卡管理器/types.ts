@@ -2,7 +2,7 @@ export type CharacterFilter = 'all' | 'favorite' | 'worldBook' | 'missingGreetin
 
 export type CharacterSort = 'date_added' | 'date_last_chat' | 'name';
 
-export type TagFilterMode = 'or' | 'and';
+export type TagFilterMode = 'exclusive' | 'or' | 'and';
 
 export interface CharacterIssue {
   level: 'info' | 'warning' | 'error';

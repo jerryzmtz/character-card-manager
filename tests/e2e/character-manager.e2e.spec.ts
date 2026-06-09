@@ -185,10 +185,17 @@ test('标签筛选支持多选切换，并可在设置里切换或且逻辑', as
   await expect(page.getByText('1 个匹配项')).toBeVisible();
 
   await page.getByRole('button', { name: '日本語 0' }).click();
-  await expect(page.getByText('1 个匹配项')).toBeVisible();
+  await expect(page.getByText('0 个匹配项')).toBeVisible();
 
   await page.getByTitle('设置').click();
   await expect(page.getByRole('dialog', { name: '设置' })).toBeVisible();
+  await expect(page.getByRole('radio', { name: '单选' })).toBeChecked();
+  await page.getByRole('radio', { name: '或' }).click();
+  await page.getByTitle('关闭设置').click();
+  await page.getByRole('button', { name: '待整理 1' }).click();
+  await expect(page.getByText('1 个匹配项')).toBeVisible();
+
+  await page.getByTitle('设置').click();
   await page.getByRole('radio', { name: '且' }).click();
   await page.getByTitle('关闭设置').click();
   await expect(page.getByText('0 个匹配项')).toBeVisible();
