@@ -23,9 +23,16 @@ const sortBy = ref<CharacterSort>('date_added');
 const globalIssues = ref<string[]>([]);
 const leftCollapsed = ref(false);
 const rightCollapsed = ref(false);
+const cardSizeIndex = ref(1);
 const avatarUrlIndex = ref<Record<string, number>>({});
 const originalAvatarUrls = ref<Record<string, string>>({});
 const loadingOriginalAvatars = new Set<string>();
+const cardSizes = [
+  { label: '小', width: 132 },
+  { label: '中', width: 168 },
+  { label: '大', width: 216 },
+  { label: '特大', width: 268 },
+];
 
 const visibleCharacters = computed(() =>
   sortCharacters(filterCharacters(characters.value, query.value, activeFilter.value), sortBy.value),
@@ -36,6 +43,9 @@ const selectedSummary = computed(() => characters.value.find(character => charac
 const issueCount = computed(() => characters.value.reduce((count, character) => count + character.issues.length, 0));
 
 const activePreview = computed(() => selectedDetail.value || selectedSummary.value || null);
+const previewRiskIssues = computed(() => activePreview.value?.issues.filter(issue => issue.level !== 'info') || []);
+const cardSize = computed(() => cardSizes[cardSizeIndex.value]);
+const cardGridStyle = computed(() => ({ '--cm-card-min': `${cardSize.value.width}px` }));
 
 onMounted(() => {
   void refreshList();
@@ -84,9 +94,9 @@ function formatDate(timestamp: number): string {
   });
 }
 
-function truncate(text: string, fallback = '无内容'): string {
+function truncate(text: string, fallback = '无内容', maxLength = 140): string {
   if (!text) return fallback;
-  return text.length > 180 ? `${text.slice(0, 180)}...` : text;
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
 function getAvatarSrc(character: CharacterSummary | CharacterDetail): string {
@@ -107,6 +117,10 @@ function handleAvatarError(character: CharacterSummary | CharacterDetail) {
       [character.fileName]: index + 1,
     };
   }
+}
+
+function changeCardSize(delta: number) {
+  cardSizeIndex.value = Math.min(Math.max(cardSizeIndex.value + delta, 0), cardSizes.length - 1);
 }
 
 async function loadOriginalAvatar(character: CharacterSummary | CharacterDetail) {
@@ -214,13 +228,32 @@ function requestClose() {
         <div class="cm-list-head">
           <strong>{{ visibleCharacters.length }} 个匹配项</strong>
           <span v-if="loadingList">正在刷新...</span>
+          <div class="cm-gallery-tools" aria-label="卡片大小">
+            <button
+              type="button"
+              title="缩小卡片"
+              :disabled="cardSizeIndex === 0"
+              @click="changeCardSize(-1)"
+            >
+              −
+            </button>
+            <output>{{ cardSize.label }}</output>
+            <button
+              type="button"
+              title="放大卡片"
+              :disabled="cardSizeIndex === cardSizes.length - 1"
+              @click="changeCardSize(1)"
+            >
+              +
+            </button>
+          </div>
         </div>
 
         <div v-if="!loadingList && visibleCharacters.length === 0" class="cm-empty">
           没有匹配的角色卡，调整搜索或刷新列表。
         </div>
 
-        <div v-else class="cm-card-grid">
+        <div v-else class="cm-card-grid" :style="cardGridStyle">
           <button
             v-for="character in visibleCharacters"
             :key="character.fileName"
@@ -251,35 +284,52 @@ function requestClose() {
             <img :src="getAvatarSrc(activePreview)" :alt="activePreview.name" @error="handleAvatarError(activePreview)" />
             <div>
               <h2>{{ activePreview.name }}</h2>
-              <p>{{ activePreview.fileName }}</p>
             </div>
           </div>
 
-          <div class="cm-meta-grid">
-            <span><strong>作者</strong>{{ activePreview.creator || '未知' }}</span>
-            <span><strong>版本</strong>{{ activePreview.character_version || '未知' }}</span>
-            <span><strong>世界书</strong>{{ activePreview.character_book || '无' }}</span>
-            <span><strong>Token</strong>{{ activePreview.tokens || '未知' }}</span>
-            <span><strong>导入时间</strong>{{ formatDate(activePreview.date_added) }}</span>
-            <span><strong>最后聊天</strong>{{ formatDate(activePreview.date_last_chat) }}</span>
-          </div>
+          <dl class="cm-meta-list">
+            <div>
+              <dt>作者</dt>
+              <dd>{{ activePreview.creator || '未知' }}</dd>
+            </div>
+            <div>
+              <dt>版本</dt>
+              <dd>{{ activePreview.character_version || '未知' }}</dd>
+            </div>
+            <div>
+              <dt>Token</dt>
+              <dd>{{ activePreview.tokens || '未知' }}</dd>
+            </div>
+            <div>
+              <dt>世界书</dt>
+              <dd>{{ activePreview.character_book || '无' }}</dd>
+            </div>
+            <div>
+              <dt>导入</dt>
+              <dd>{{ formatDate(activePreview.date_added) }}</dd>
+            </div>
+            <div>
+              <dt>聊天</dt>
+              <dd>{{ formatDate(activePreview.date_last_chat) }}</dd>
+            </div>
+          </dl>
 
           <div v-if="loadingDetail" class="cm-inline-status">正在读取详情...</div>
 
-          <div v-if="activePreview.issues.length" class="cm-risk-list">
-            <p v-for="issue in activePreview.issues" :key="issue.message" :class="issue.level">
+          <div v-if="previewRiskIssues.length" class="cm-risk-list">
+            <p v-for="issue in previewRiskIssues" :key="issue.message" :class="issue.level">
               {{ issue.message }}
             </p>
           </div>
 
           <article class="cm-section">
             <h3>描述</h3>
-            <p>{{ truncate(selectedDetail?.description || activePreview.desc) }}</p>
+            <p>{{ truncate(selectedDetail?.description || activePreview.desc, '无内容', 160) }}</p>
           </article>
 
           <article class="cm-section">
             <h3>主开场白</h3>
-            <p>{{ truncate(selectedDetail?.first_mes || activePreview.firstMes) }}</p>
+            <p>{{ truncate(selectedDetail?.first_mes || activePreview.firstMes, '无内容', 160) }}</p>
           </article>
 
           <article class="cm-section">
@@ -386,7 +436,7 @@ function requestClose() {
 
 .cm-workspace {
   display: grid;
-  grid-template-columns: minmax(280px, 330px) minmax(320px, 1fr) minmax(320px, 430px);
+  grid-template-columns: minmax(260px, 300px) minmax(420px, 1fr) minmax(300px, 360px);
   gap: 12px;
   margin-top: 12px;
   min-height: 0;
@@ -395,15 +445,15 @@ function requestClose() {
 }
 
 .cm-workspace.left-collapsed {
-  grid-template-columns: 0 minmax(320px, 1fr) minmax(320px, 430px);
+  grid-template-columns: 0 minmax(420px, 1fr) minmax(300px, 360px);
 }
 
 .cm-workspace.right-collapsed {
-  grid-template-columns: minmax(280px, 330px) minmax(320px, 1fr) 0;
+  grid-template-columns: minmax(260px, 300px) minmax(420px, 1fr) 0;
 }
 
 .cm-workspace.left-collapsed.right-collapsed {
-  grid-template-columns: 0 minmax(320px, 1fr) 0;
+  grid-template-columns: 0 minmax(420px, 1fr) 0;
 }
 
 .cm-controls,
@@ -540,14 +590,58 @@ function requestClose() {
 
 .cm-list-head {
   display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: 10px;
   padding: 11px 12px;
   border-bottom: 1px solid var(--cm-border);
 }
 
+.cm-list-head > span {
+  margin-left: auto;
+}
+
+.cm-gallery-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-bg);
+}
+
+.cm-gallery-tools button {
+  width: 26px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--cm-text);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.cm-gallery-tools button:hover:not(:disabled) {
+  background: var(--cm-panel-2);
+}
+
+.cm-gallery-tools button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.cm-gallery-tools output {
+  min-width: 28px;
+  color: var(--cm-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
 .cm-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(var(--cm-card-min, 168px), 1fr));
   gap: 12px;
   padding: 12px;
 }
@@ -557,6 +651,7 @@ function requestClose() {
   display: grid;
   grid-template-rows: auto 24px;
   gap: 8px;
+  width: 100%;
   padding: 8px;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -582,7 +677,15 @@ function requestClose() {
   background: oklch(13% 0.01 248);
 }
 
-.cm-thumb img,
+.cm-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: auto;
+  background: oklch(13% 0.01 248);
+}
+
 .cm-preview-head img {
   width: 100%;
   height: 100%;
@@ -613,68 +716,87 @@ function requestClose() {
 .cm-preview {
   display: grid;
   align-content: start;
-  gap: 12px;
+  gap: 10px;
 }
 
 .cm-preview-head {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
+  grid-template-columns: 48px minmax(0, 1fr);
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .cm-preview-head img {
-  width: 58px;
-  height: 58px;
+  width: 48px;
+  height: 48px;
   border-radius: 6px;
 }
 
 .cm-preview-head h2 {
   font-size: 17px;
+  line-height: 1.25;
   overflow-wrap: anywhere;
 }
 
-.cm-preview-head p {
-  margin: 4px 0 0;
-  overflow-wrap: anywhere;
-  font-size: 12px;
-}
-
-.cm-meta-grid {
+.cm-meta-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.cm-meta-grid span {
-  min-width: 0;
+  gap: 0;
+  margin: 0;
   border: 1px solid var(--cm-border);
   border-radius: 6px;
   background: var(--cm-bg);
-  padding: 8px;
+  overflow: hidden;
+}
+
+.cm-meta-list div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--cm-border);
   color: var(--cm-muted);
   overflow-wrap: anywhere;
 }
 
-.cm-meta-grid strong {
-  display: block;
-  margin-bottom: 3px;
+.cm-meta-list div:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.cm-meta-list div:nth-child(odd) {
+  border-right: 1px solid var(--cm-border);
+}
+
+.cm-meta-list dt {
   color: var(--cm-weak);
   font-size: 11px;
+  font-weight: 700;
+}
+
+.cm-meta-list dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--cm-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cm-section {
   border-top: 1px solid var(--cm-border);
-  padding-top: 10px;
+  padding-top: 9px;
 }
 
 .cm-section h3 {
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .cm-section p {
-  margin: 6px 0 0;
-  line-height: 1.6;
+  margin: 5px 0 0;
+  color: var(--cm-muted);
+  line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -714,11 +836,20 @@ function requestClose() {
   }
 
   .cm-card-grid {
-    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(var(--cm-card-min, 168px), 100%), 1fr));
   }
 
-  .cm-meta-grid {
+  .cm-meta-list {
     grid-template-columns: 1fr;
+  }
+
+  .cm-meta-list div,
+  .cm-meta-list div:nth-child(odd) {
+    border-right: 0;
+  }
+
+  .cm-meta-list div:nth-last-child(2) {
+    border-bottom: 1px solid var(--cm-border);
   }
 }
 </style>

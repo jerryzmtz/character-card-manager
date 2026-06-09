@@ -90,7 +90,7 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   await expect(page.getByRole('button', { name: '缺开场白 1' })).toBeVisible();
   await expect
     .poll(async () =>
-      page.locator('.cm-thumb').first().evaluate(element => {
+      page.locator('.cm-thumb img').first().evaluate(element => {
         const rect = element.getBoundingClientRect();
         return Math.round((rect.height / rect.width) * 100);
       }),
@@ -112,7 +112,9 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
 
   await page.getByRole('button', { name: '莉莉丝' }).click();
   await expect(page.getByText('夜城里的观察者，负责验证中文 DOM。')).toBeVisible();
-  await expect(page.getByText('关联世界书：夜城世界书')).toBeVisible();
+  await expect(page.locator('.cm-preview')).toContainText('夜城世界书');
+  await expect(page.getByText('关联世界书：夜城世界书')).toHaveCount(0);
+  await expect(page.locator('.cm-preview-head')).not.toContainText('莉莉丝.png');
 });
 
 test('移动端宽度下保持单列可读', async ({ page }) => {
@@ -130,6 +132,18 @@ test('左右栏可以收起展开，中间缩略图区域随之扩大', async ({
   await page.goto(pageUrl);
 
   const firstWidth = await page.locator('.cm-list-panel').evaluate(element => Math.round(element.getBoundingClientRect().width));
+  const firstCardWidth = await page.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().width));
+  await page.getByTitle('放大卡片').click();
+  await expect
+    .poll(() => page.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().width)))
+    .toBeGreaterThan(firstCardWidth);
+  const largeCardWidth = await page.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().width));
+  await page.getByTitle('缩小卡片').click();
+  await page.getByTitle('缩小卡片').click();
+  await expect
+    .poll(() => page.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().width)))
+    .toBeLessThan(largeCardWidth);
+
   await page.getByTitle('收起左栏').click();
   await page.getByTitle('收起右栏').click();
   await expect(page.locator('.cm-workspace')).toHaveClass(/left-collapsed/);
@@ -212,7 +226,7 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
   await expect(managerFrame.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
   await expect
     .poll(async () =>
-      managerFrame.locator('.cm-thumb').first().evaluate(element => {
+      managerFrame.locator('.cm-thumb img').first().evaluate(element => {
         const rect = element.getBoundingClientRect();
         return Math.round((rect.height / rect.width) * 100);
       }),
