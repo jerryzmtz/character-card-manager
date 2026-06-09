@@ -43,15 +43,14 @@ function openManager() {
     root.style.inset = '0';
     root.style.zIndex = '100000';
     root.style.boxSizing = 'border-box';
-    root.style.display = 'grid';
-    root.style.placeItems = 'center';
-    root.style.padding = '18px';
-    root.style.background = 'oklch(8% 0.01 248 / 0.78)';
+    root.style.display = 'block';
+    root.style.padding = '0';
+    root.style.background = 'oklch(8% 0.01 248)';
     hostDocument.body.appendChild(root);
     appendManagerPanel(root, hostDocument);
   }
 
-  root.style.display = 'grid';
+  root.style.display = 'block';
 }
 
 function closeManager() {
@@ -64,13 +63,12 @@ function closeManager() {
 function appendManagerPanel(root: HTMLElement, hostDocument: Document) {
   const panel = hostDocument.createElement('div');
   panel.style.position = 'relative';
-  panel.style.width = 'min(1480px, 96vw)';
-  panel.style.height = 'min(900px, 92vh)';
+  panel.style.width = '100vw';
+  panel.style.height = '100vh';
   panel.style.overflow = 'hidden';
-  panel.style.border = '1px solid oklch(37% 0.018 248)';
-  panel.style.borderRadius = '8px';
+  panel.style.border = '0';
+  panel.style.borderRadius = '0';
   panel.style.background = 'oklch(16% 0.012 248)';
-  panel.style.boxShadow = '0 18px 70px oklch(0% 0 0 / 0.44)';
 
   const frame = hostDocument.createElement('iframe');
   frame.title = MANAGER_FRAME_TITLE;
@@ -82,26 +80,7 @@ function appendManagerPanel(root: HTMLElement, hostDocument: Document) {
   frame.style.border = '0';
   frame.style.background = 'oklch(16% 0.012 248)';
 
-  const closeButton = hostDocument.createElement('button');
-  closeButton.type = 'button';
-  closeButton.textContent = '×';
-  closeButton.title = '关闭角色卡管理器';
-  closeButton.style.position = 'fixed';
-  closeButton.style.top = '10px';
-  closeButton.style.right = '10px';
-  closeButton.style.zIndex = '100002';
-  closeButton.style.width = '36px';
-  closeButton.style.height = '36px';
-  closeButton.style.border = '1px solid oklch(42% 0.018 248)';
-  closeButton.style.borderRadius = '6px';
-  closeButton.style.background = 'oklch(20% 0.012 248)';
-  closeButton.style.color = 'oklch(91% 0.01 248)';
-  closeButton.style.fontSize = '22px';
-  closeButton.style.cursor = 'pointer';
-  closeButton.addEventListener('click', closeManager);
-
   panel.appendChild(frame);
-  panel.appendChild(closeButton);
   root.appendChild(panel);
   void loadFrameDocument(frame, previewUrl);
 }

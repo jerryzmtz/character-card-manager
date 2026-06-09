@@ -180,6 +180,35 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
   await expect(page.locator('#character-card-manager-host-root')).toBeVisible();
   const managerFrame = page.frameLocator('iframe[title="角色卡管理器面板"]');
   await expect(page.locator('iframe[title="角色卡管理器面板"]')).toHaveAttribute('src', pageUrl);
+  await expect(page.getByTitle('关闭角色卡管理器')).toHaveCount(0);
+  const viewportSize = await page.evaluate(() => ({
+    height: window.innerHeight,
+    width: window.innerWidth,
+  }));
+  await expect
+    .poll(() =>
+      page.locator('#character-card-manager-host-root').evaluate(element => {
+        const rect = element.getBoundingClientRect();
+        return {
+          height: Math.round(rect.height),
+          width: Math.round(rect.width),
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+        };
+      }),
+    )
+    .toEqual({ ...viewportSize, x: 0, y: 0 });
+  await expect
+    .poll(() =>
+      page.locator('iframe[title="角色卡管理器面板"]').evaluate(element => {
+        const rect = element.getBoundingClientRect();
+        return {
+          height: Math.round(rect.height),
+          width: Math.round(rect.width),
+        };
+      }),
+    )
+    .toEqual(viewportSize);
   await expect(managerFrame.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
   await expect
     .poll(async () =>
