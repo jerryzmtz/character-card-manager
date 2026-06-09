@@ -47,6 +47,23 @@ test.beforeEach(async ({ page }) => {
         },
       },
     ];
+    window.__dangerousApiCalls = [];
+    window.__saveSettingsCount = 0;
+    window.__tavernContext = {
+      characters: window.characters,
+      tags: [
+        { id: '整理', name: '待整理', color: '#5599ff' },
+        { id: '日文', name: '日本語' },
+      ],
+      tagMap: { '莉莉丝.png': ['整理'], '空白卡.png': [] },
+      getCharacters: async () => window.characters,
+      saveSettingsDebounced: async () => {
+        window.__saveSettingsCount += 1;
+      },
+    };
+    window.SillyTavern = {
+      getContext: () => window.__tavernContext,
+    };
     window.getCharacters = async () => window.characters;
     window.getThumbnailUrl = (type, file) => `/thumbnail?type=${type}&file=${encodeURIComponent(file)}`;
     const nativeFetch = window.fetch.bind(window);
@@ -55,6 +72,9 @@ test.beforeEach(async ({ page }) => {
       if (String(_url).startsWith('/characters/')) {
         window.__characterImageRequests.push(String(_url));
         return nativeFetch(_url, options);
+      }
+      if (/\/api\/characters\/(?:delete|rename|edit)|\/api\/worldinfo\/edit/.test(String(_url))) {
+        window.__dangerousApiCalls.push(String(_url));
       }
       const body = JSON.parse(String(options?.body || '{}'));
       const selected = window.characters.find(character => character.avatar === body.avatar_url);
@@ -87,6 +107,7 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
   await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
   await expect(page.getByRole('button', { name: '空白卡' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '待整理 1' })).toBeVisible();
   await expect(page.getByRole('button', { name: '缺开场白 1' })).toBeVisible();
   await expect
     .poll(async () =>
@@ -109,12 +130,54 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   await page.getByPlaceholder('名称、作者、文件名、描述').fill('莉莉');
   await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
   await expect(page.getByText('空白卡.png')).toHaveCount(0);
+  await page.getByPlaceholder('名称、作者、文件名、描述').fill('待整理');
+  await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
+  await page.getByPlaceholder('名称、作者、文件名、描述').fill('');
 
   await page.getByRole('button', { name: '莉莉丝' }).click();
   await expect(page.getByText('夜城里的观察者，负责验证中文 DOM。')).toBeVisible();
   await expect(page.locator('.cm-preview')).toContainText('夜城世界书');
+  await expect(page.locator('.cm-preview')).toContainText('待整理');
   await expect(page.getByText('关联世界书：夜城世界书')).toHaveCount(0);
   await expect(page.locator('.cm-preview-head')).not.toContainText('莉莉丝.png');
+});
+
+test('批量选择会先预览再写入酒馆标签且不调用危险接口', async ({ page }) => {
+  await page.goto(pageUrl);
+
+  await page.getByRole('button', { name: '选择' }).click();
+  await page.getByRole('button', { name: '全选当前' }).click();
+  await expect(page.getByText('2 已选')).toBeVisible();
+  await expect(page.getByRole('heading', { name: '2 个已选角色' })).toBeVisible();
+
+  await page.getByRole('button', { name: '预览变更' }).click();
+  await expect(page.getByText('变更预览')).toBeVisible();
+  await expect(page.getByText(/会更新 1 个角色/)).toBeVisible();
+  await expect(page.evaluate(() => window.__saveSettingsCount)).resolves.toBe(0);
+
+  await page.getByRole('button', { name: '确认写入酒馆标签' }).click();
+  await expect.poll(() => page.evaluate(() => window.__saveSettingsCount)).toBe(1);
+  await expect(page.evaluate(() => window.__tavernContext.tagMap['空白卡.png'])).resolves.toEqual(['整理']);
+  await expect(page.evaluate(() => window.__dangerousApiCalls)).resolves.toEqual([]);
+});
+
+test('标签筛选支持多选切换，并可在设置里切换或且逻辑', async ({ page }) => {
+  await page.goto(pageUrl);
+
+  await page.getByRole('button', { name: '待整理 1' }).click();
+  await expect(page.getByText('1 个匹配项')).toBeVisible();
+
+  await page.getByRole('button', { name: '日本語 0' }).click();
+  await expect(page.getByText('1 个匹配项')).toBeVisible();
+
+  await page.getByTitle('设置').click();
+  await expect(page.getByRole('dialog', { name: '设置' })).toBeVisible();
+  await page.getByRole('radio', { name: '且' }).click();
+  await page.getByTitle('关闭设置').click();
+  await expect(page.getByText('0 个匹配项')).toBeVisible();
+
+  await page.getByRole('button', { name: '日本語 0' }).click();
+  await expect(page.getByText('1 个匹配项')).toBeVisible();
 });
 
 test('移动端宽度下保持单列可读', async ({ page }) => {
@@ -193,7 +256,17 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
   await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
   await expect(page.locator('#character-card-manager-host-root')).toBeVisible();
   const managerFrame = page.frameLocator('iframe[title="角色卡管理器面板"]');
-  await expect(page.locator('iframe[title="角色卡管理器面板"]')).toHaveAttribute('src', pageUrl);
+  await expect
+    .poll(() =>
+      page.locator('iframe[title="角色卡管理器面板"]').evaluate(element => {
+        const url = new URL((element as HTMLIFrameElement).src);
+        return {
+          path: decodeURIComponent(url.pathname),
+          hasCacheBust: /^\d+-\d+$/.test(url.searchParams.get('t') || ''),
+        };
+      }),
+    )
+    .toEqual({ path: '/dist/角色卡管理器预览/index.html', hasCacheBust: true });
   await expect(page.getByTitle('关闭角色卡管理器')).toHaveCount(0);
   const viewportSize = await page.evaluate(() => ({
     height: window.innerHeight,
@@ -234,5 +307,16 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
     .toBe(133);
 
   await managerFrame.getByTitle('关闭面板').click();
-  await expect(page.locator('#character-card-manager-host-root')).toBeHidden();
+  await expect(page.locator('#character-card-manager-host-root')).toHaveCount(0);
+
+  await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
+  const firstSrc = await page.locator('iframe[title="角色卡管理器面板"]').getAttribute('src');
+  await page.evaluate(() =>
+    window.dispatchEvent(new MessageEvent('message', { data: { source: 'character-card-manager', type: 'close' } })),
+  );
+  await expect(page.locator('#character-card-manager-host-root')).toHaveCount(0);
+  await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
+  await expect
+    .poll(async () => page.locator('iframe[title="角色卡管理器面板"]').getAttribute('src'))
+    .not.toBe(firstSrc);
 });

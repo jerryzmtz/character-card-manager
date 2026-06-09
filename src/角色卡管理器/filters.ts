@@ -1,13 +1,16 @@
-import type { CharacterFilter, CharacterSort, CharacterSummary } from './types';
+import type { CharacterFilter, CharacterSort, CharacterSummary, TagFilterMode } from './types';
 
 export function filterCharacters(
   characters: CharacterSummary[],
   query: string,
   filter: CharacterFilter,
+  activeTagIds: string[] = [],
+  tagFilterMode: TagFilterMode = 'or',
 ): CharacterSummary[] {
   const keyword = query.trim().toLocaleLowerCase('zh-CN');
   return characters.filter(character => {
     if (!matchesFilter(character, filter)) return false;
+    if (!matchesTags(character, activeTagIds, tagFilterMode)) return false;
     if (!keyword) return true;
     return getSearchText(character).toLocaleLowerCase('zh-CN').includes(keyword);
   });
@@ -30,8 +33,17 @@ function matchesFilter(character: CharacterSummary, filter: CharacterFilter): bo
   if (filter === 'favorite') return character.fav;
   if (filter === 'worldBook') return Boolean(character.character_book);
   if (filter === 'missingGreeting') return !character.firstMes;
+  if (filter === 'untagged') return character.tagIds.length === 0;
   if (filter === 'error') return character.issues.some(issue => issue.level === 'error');
   return true;
+}
+
+function matchesTags(character: CharacterSummary, activeTagIds: string[], tagFilterMode: TagFilterMode): boolean {
+  if (activeTagIds.length === 0) return true;
+  if (tagFilterMode === 'and') {
+    return activeTagIds.every(id => character.tagIds.includes(id));
+  }
+  return activeTagIds.some(id => character.tagIds.includes(id));
 }
 
 function getSearchText(character: CharacterSummary): string {
@@ -41,6 +53,7 @@ function getSearchText(character: CharacterSummary): string {
     character.creator,
     character.character_version,
     character.character_book,
+    ...character.tags.map(tag => tag.name),
     character.desc,
     character.firstMes,
   ].join(' ');

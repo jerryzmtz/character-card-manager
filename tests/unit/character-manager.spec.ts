@@ -3,12 +3,15 @@ import { describe, expect, it, vi } from 'vitest';
 import App from '../../src/角色卡管理器/App.vue';
 import { filterCharacters, sortCharacters } from '../../src/角色卡管理器/filters';
 import {
+  applyTagMutation,
   loadCharacterOriginalImage,
   normalizeSummary,
   readCharacterDetail,
   readCharacterList,
+  readTavernTags,
 } from '../../src/角色卡管理器/host';
-import type { CharacterSummary } from '../../src/角色卡管理器/types';
+import { previewTagMutation } from '../../src/角色卡管理器/tags';
+import type { CharacterSummary, CharacterTag } from '../../src/角色卡管理器/types';
 
 function makeCharacter(patch: Partial<CharacterSummary> = {}): CharacterSummary {
   return {
@@ -17,6 +20,8 @@ function makeCharacter(patch: Partial<CharacterSummary> = {}): CharacterSummary 
     avatarUrl: '/characters/%E8%8E%89%E8%8E%89%E4%B8%9D.png',
     avatarFallbackUrls: ['/characters/%E8%8E%89%E8%8E%89%E4%B8%9D.png'],
     fav: false,
+    tagIds: [],
+    tags: [],
     date_added: 100,
     date_last_chat: 20,
     creator: '测试作者',
@@ -99,29 +104,136 @@ describe('角色卡数据读取与归一化', () => {
     expect(detail.detailLoaded).toBe(false);
     expect(detail.issues.some(issue => issue.message.includes('详情读取失败'))).toBe(true);
   });
+
+  it('读取酒馆标签并按角色文件名绑定，兼容中文和日文标签', async () => {
+    const host = {
+      SillyTavern: {
+        getContext: () => ({
+          characters: [{ avatar: '雪乃.webp', name: '雪乃', data: { first_mes: 'こんにちは' } }],
+          tags: [
+            { id: '整理', name: '待整理', color: '#5599ff' },
+            { id: 'jp', name: '日本語' },
+          ],
+          tagMap: { '雪乃.webp': ['整理', 'jp'] },
+        }),
+      },
+    } as unknown as Window & typeof globalThis;
+
+    const tags = readTavernTags(host);
+    const result = await readCharacterList(host);
+
+    expect(tags.tags.map(tag => tag.name)).toEqual(['待整理', '日本語']);
+    expect(result.characters[0].tags.map(tag => tag.name)).toEqual(['待整理', '日本語']);
+  });
+
+  it('标签上下文缺失和未知标签 id 会给出可见提示', () => {
+    const missing = readTavernTags({} as Window & typeof globalThis);
+    const unknown = readTavernTags({
+      SillyTavern: {
+        getContext: () => ({ tags: [{ id: 'known', name: '已知' }], tagMap: { '空白卡.png': ['ghost'] } }),
+      },
+    } as unknown as Window & typeof globalThis);
+
+    expect(missing.issues[0].message).toContain('标签上下文');
+    expect(unknown.issues[0].message).toContain('未知标签绑定');
+  });
 });
 
 describe('搜索、排序和筛选', () => {
+  const tag: CharacterTag = { id: '整理', name: '待整理' };
+  const jpTag: CharacterTag = { id: '日文', name: '日本語' };
   const characters = [
-    makeCharacter({ name: '莉莉丝', fav: true, date_added: 300, character_book: '夜城世界书' }),
-    makeCharacter({ fileName: '明日香.png', name: '明日香', date_added: 200, firstMes: '', issues: [{ level: 'warning', message: '缺少主开场白，导入或游玩前建议检查。' }] }),
+    makeCharacter({ name: '莉莉丝', fav: true, date_added: 300, character_book: '夜城世界书', tagIds: ['整理', '日文'], tags: [tag, jpTag] }),
+    makeCharacter({ fileName: '明日香.png', name: '明日香', date_added: 200, tagIds: ['日文'], tags: [jpTag], firstMes: '', issues: [{ level: 'warning', message: '缺少主开场白，导入或游玩前建议检查。' }] }),
     makeCharacter({ fileName: 'NoName.png', name: 'NoName', date_added: 100, readError: '失败', issues: [{ level: 'error', message: '详情读取失败：HTTP 500' }] }),
   ];
 
   it('支持中文关键词搜索', () => {
     expect(filterCharacters(characters, '明日', 'all').map(character => character.name)).toEqual(['明日香']);
+    expect(filterCharacters(characters, '待整理', 'all').map(character => character.name)).toEqual(['莉莉丝']);
   });
 
-  it('支持收藏、世界书、缺开场白和异常筛选', () => {
+  it('支持收藏、世界书、缺开场白、未打标签和异常筛选', () => {
     expect(filterCharacters(characters, '', 'favorite')).toHaveLength(1);
     expect(filterCharacters(characters, '', 'worldBook')).toHaveLength(1);
     expect(filterCharacters(characters, '', 'missingGreeting')).toHaveLength(1);
+    expect(filterCharacters(characters, '', 'untagged')).toHaveLength(1);
     expect(filterCharacters(characters, '', 'error')).toHaveLength(1);
+    expect(filterCharacters(characters, '', 'all', ['整理'])).toHaveLength(1);
+    expect(filterCharacters(characters, '', 'all', ['整理', '日文'], 'or')).toHaveLength(2);
+    expect(filterCharacters(characters, '', 'all', ['整理', '日文'], 'and')).toHaveLength(1);
   });
 
   it('按导入时间倒序，按名称正序', () => {
     expect(sortCharacters(characters, 'date_added')[0].name).toBe('莉莉丝');
     expect(sortCharacters(characters, 'name').map(character => character.name)).toEqual(['莉莉丝', '明日香', 'NoName']);
+  });
+});
+
+describe('标签批量预览与写入', () => {
+  const tags: CharacterTag[] = [{ id: '整理', name: '待整理' }];
+  const tagMap = { '莉莉丝.png': ['整理'], '空白卡.png': [] };
+
+  it('预览添加、移除、新建标签和空选择错误', () => {
+    const addPreview = previewTagMutation(tags, tagMap, {
+      action: 'add',
+      tagId: '整理',
+      fileNames: ['莉莉丝.png', '空白卡.png'],
+    });
+    const removePreview = previewTagMutation(tags, tagMap, {
+      action: 'remove',
+      tagId: '整理',
+      fileNames: ['莉莉丝.png', '空白卡.png'],
+    });
+    const createPreview = previewTagMutation(tags, tagMap, {
+      action: 'create',
+      tagName: '中文新标签',
+      fileNames: ['空白卡.png'],
+    });
+    const emptyPreview = previewTagMutation(tags, tagMap, { action: 'add', tagId: '整理', fileNames: [] });
+
+    expect(addPreview.changedFileNames).toEqual(['空白卡.png']);
+    expect(addPreview.unchangedFileNames).toEqual(['莉莉丝.png']);
+    expect(removePreview.changedFileNames).toEqual(['莉莉丝.png']);
+    expect(createPreview.createsTag).toBe(true);
+    expect(emptyPreview.errors.join(' ')).toContain('没有选择角色');
+  });
+
+  it('确认写入时只修改 tags/tagMap 并调用酒馆保存函数', async () => {
+    const context = {
+      tags: [{ id: '整理', name: '待整理' }],
+      tagMap: { '莉莉丝.png': ['整理'], '空白卡.png': [] },
+      saveSettingsDebounced: vi.fn(),
+    };
+    const host = {
+      SillyTavern: {
+        getContext: () => context,
+      },
+    } as unknown as Window & typeof globalThis;
+
+    const result = await applyTagMutation({ action: 'add', tagId: '整理', fileNames: ['空白卡.png'] }, host);
+
+    expect(result.success).toBe(true);
+    expect(context.tagMap['空白卡.png']).toEqual(['整理']);
+    expect(context.saveSettingsDebounced).toHaveBeenCalledTimes(1);
+  });
+
+  it('保存失败时返回错误且不静默吞掉', async () => {
+    const context = {
+      tags: [{ id: '整理', name: '待整理' }],
+      tagMap: { '空白卡.png': [] },
+      saveSettingsDebounced: vi.fn().mockRejectedValue(new Error('磁盘不可写')),
+    };
+    const host = {
+      SillyTavern: {
+        getContext: () => context,
+      },
+    } as unknown as Window & typeof globalThis;
+
+    const result = await applyTagMutation({ action: 'add', tagId: '整理', fileNames: ['空白卡.png'] }, host);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('磁盘不可写');
   });
 });
 
@@ -131,6 +243,7 @@ describe('角色卡管理器组件', () => {
       typeof globalThis & {
         characters?: unknown[];
         getCharacters?: () => void;
+        SillyTavern?: unknown;
       };
     host.characters = [
       {
@@ -150,6 +263,14 @@ describe('角色卡管理器组件', () => {
         data: {},
       },
     ];
+    host.SillyTavern = {
+      getContext: () => ({
+        characters: host.characters,
+        getCharacters: host.getCharacters,
+        tags: [{ id: '整理', name: '待整理' }],
+        tagMap: { '莉莉丝.png': ['整理'] },
+      }),
+    };
     host.getCharacters = vi.fn();
     host.fetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -173,11 +294,137 @@ describe('角色卡管理器组件', () => {
     expect(wrapper.text()).toContain('空白卡');
     expect(wrapper.text()).toContain('缺开场白');
 
-    await wrapper.get('button.cm-card').trigger('click');
+    await wrapper.get('.cm-card').trigger('click');
     await vi.waitFor(() => expect(wrapper.text()).toContain('她负责验证详情预览。'));
 
     expect(wrapper.text()).toContain('夜城世界书');
+    expect(wrapper.text()).toContain('待整理');
     expect(wrapper.text()).not.toContain('??');
+  });
+
+  it('支持选择模式、全选当前结果、清空和标签写入预览', async () => {
+    const context = {
+      characters: [
+        { avatar: '莉莉丝.png', name: '莉莉丝', data: { first_mes: '你好。' } },
+        { avatar: '空白卡.png', name: '空白卡', data: { first_mes: '你好。' } },
+      ],
+      tags: [{ id: '整理', name: '待整理' }],
+      tagMap: { '莉莉丝.png': ['整理'], '空白卡.png': [] },
+      saveSettingsDebounced: vi.fn(),
+    };
+    const host = window as Window &
+      typeof globalThis & {
+        SillyTavern?: unknown;
+        characters?: unknown[];
+      };
+    host.SillyTavern = { getContext: () => context };
+    host.characters = context.characters;
+
+    const wrapper = mount(App);
+    await vi.waitFor(() => expect(wrapper.text()).toContain('莉莉丝'));
+
+    await wrapper.get('button[aria-pressed="false"].cm-selection-toggle').trigger('click');
+    await wrapper.findAll('.cm-list-tools button')[1].trigger('click');
+    expect(wrapper.text()).toContain('2 已选');
+    expect(wrapper.text()).toContain('2 个已选角色');
+
+    await wrapper.find('.cm-tag-editor .cm-primary-action').trigger('click');
+    expect(wrapper.text()).toContain('变更预览');
+    expect(wrapper.text()).toContain('会更新 1 个角色');
+
+    await wrapper.findAll('.cm-tag-editor .cm-primary-action')[1].trigger('click');
+    await vi.waitFor(() => expect(context.saveSettingsDebounced).toHaveBeenCalledTimes(1));
+    expect(context.tagMap['空白卡.png']).toEqual(['整理']);
+
+    await wrapper.findAll('.cm-list-tools button')[2].trigger('click');
+    expect(wrapper.text()).toContain('0 已选');
+  });
+
+  it('支持标签多选、默认或逻辑和设置中的且逻辑', async () => {
+    const context = {
+      characters: [
+        { avatar: '开放.png', name: '开放角色', data: { first_mes: '你好。' } },
+        { avatar: '日本.png', name: '日本角色', data: { first_mes: '你好。' } },
+        { avatar: '重叠.png', name: '重叠角色', data: { first_mes: '你好。' } },
+      ],
+      tags: [
+        { id: '开放', name: '开放世界' },
+        { id: '日本', name: '日本' },
+      ],
+      tagMap: { '开放.png': ['开放'], '日本.png': ['日本'], '重叠.png': ['开放', '日本'] },
+    };
+    const host = window as Window &
+      typeof globalThis & {
+        SillyTavern?: unknown;
+        characters?: unknown[];
+      };
+    localStorage.clear();
+    host.SillyTavern = { getContext: () => context };
+    host.characters = context.characters;
+
+    const wrapper = mount(App);
+    await vi.waitFor(() => expect(wrapper.text()).toContain('开放角色'));
+
+    const tagButtons = () => wrapper.findAll('.cm-tag-filter > button');
+    await tagButtons()[0].trigger('click');
+    expect(wrapper.text()).toContain('2 个匹配项');
+    await tagButtons()[1].trigger('click');
+    expect(wrapper.text()).toContain('3 个匹配项');
+
+    await wrapper.get('button[title="设置"]').trigger('click');
+    expect(wrapper.text()).toContain('标签过滤逻辑');
+    await wrapper.findAll('.cm-segmented button')[1].trigger('click');
+    expect(wrapper.text()).toContain('1 个匹配项');
+
+    await tagButtons()[1].trigger('click');
+    expect(wrapper.text()).toContain('2 个匹配项');
+  });
+
+  it('详情读取状态延迟显示并忽略过期响应', async () => {
+    const resolvers: Record<string, (value: Response) => void> = {};
+    const host = window as Window &
+      typeof globalThis & {
+        SillyTavern?: unknown;
+        fetch?: typeof fetch;
+      };
+    host.SillyTavern = {
+      getContext: () => ({
+        characters: [
+          { avatar: '慢卡.png', name: '慢卡', data: { first_mes: '你好。' } },
+          { avatar: '快卡.png', name: '快卡', data: { first_mes: '你好。' } },
+        ],
+        tags: [],
+        tagMap: {},
+      }),
+    };
+    host.fetch = vi.fn((_url, options) => {
+      const body = JSON.parse(String((options as RequestInit)?.body || '{}'));
+      return new Promise<Response>(resolve => {
+        resolvers[body.avatar_url] = resolve;
+      });
+    }) as typeof fetch;
+
+    const wrapper = mount(App);
+    await vi.waitFor(() => expect(wrapper.text()).toContain('慢卡'));
+
+    await wrapper.findAll('.cm-card')[0].trigger('click');
+    expect(wrapper.text()).not.toContain('正在读取详情');
+    await wrapper.findAll('.cm-card')[1].trigger('click');
+
+    resolvers['快卡.png']({
+      ok: true,
+      json: async () => ({ data: { name: '快卡', description: '新的详情', first_mes: '你好。' } }),
+    } as Response);
+    await vi.waitFor(() => expect(wrapper.text()).toContain('新的详情'));
+
+    resolvers['慢卡.png']({
+      ok: true,
+      json: async () => ({ data: { name: '慢卡', description: '旧的详情', first_mes: '你好。' } }),
+    } as Response);
+    await Promise.resolve();
+
+    expect(wrapper.text()).toContain('新的详情');
+    expect(wrapper.text()).not.toContain('旧的详情');
   });
 
   it('支持左右栏折叠和面板内关闭消息', async () => {
@@ -185,7 +432,9 @@ describe('角色卡管理器组件', () => {
       typeof globalThis & {
         characters?: unknown[];
         getCharacters?: () => void;
+        SillyTavern?: unknown;
       };
+    delete host.SillyTavern;
     host.characters = [{ avatar: '莉莉丝.png', name: '莉莉丝', data: { first_mes: '你好。' } }];
     host.getCharacters = vi.fn();
     const postMessage = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => undefined);

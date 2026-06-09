@@ -1,6 +1,7 @@
 const APP_NAME = '角色卡管理器';
 const HOST_ROOT_ID = 'character-card-manager-host-root';
 const MANAGER_FRAME_TITLE = '角色卡管理器面板';
+let localCacheBustCounter = 0;
 
 onScriptReady(() => {
   registerScriptButton();
@@ -34,29 +35,25 @@ function onReady(callback: () => void) {
 
 function openManager() {
   const hostDocument = getHostDocument();
-  let root = hostDocument.getElementById(HOST_ROOT_ID);
+  closeManager();
 
-  if (!root) {
-    root = hostDocument.createElement('div');
-    root.id = HOST_ROOT_ID;
-    root.style.position = 'fixed';
-    root.style.inset = '0';
-    root.style.zIndex = '100000';
-    root.style.boxSizing = 'border-box';
-    root.style.display = 'block';
-    root.style.padding = '0';
-    root.style.background = 'oklch(8% 0.01 248)';
-    hostDocument.body.appendChild(root);
-    appendManagerPanel(root, hostDocument);
-  }
-
+  const root = hostDocument.createElement('div');
+  root.id = HOST_ROOT_ID;
+  root.style.position = 'fixed';
+  root.style.inset = '0';
+  root.style.zIndex = '100000';
+  root.style.boxSizing = 'border-box';
   root.style.display = 'block';
+  root.style.padding = '0';
+  root.style.background = 'oklch(8% 0.01 248)';
+  hostDocument.body.appendChild(root);
+  appendManagerPanel(root, hostDocument);
 }
 
 function closeManager() {
   const root = getHostDocument().getElementById(HOST_ROOT_ID);
   if (root) {
-    root.style.display = 'none';
+    root.remove();
   }
 }
 
@@ -144,17 +141,31 @@ function getHostDocument(): Document {
 
 function getPreviewUrl(): string {
   const configuredUrl = getHelperWindow().__characterCardManagerPreviewUrl;
-  if (configuredUrl) return configuredUrl;
+  if (configuredUrl) return withLocalCacheBust(configuredUrl);
 
   const script = Array.from(document.scripts).find(element =>
     decodeURIComponent(element.src).includes('/dist/角色卡管理器/index.js'),
   );
   if (script?.src) {
-    return decodeURIComponent(script.src).replace(
+    return withLocalCacheBust(decodeURIComponent(script.src).replace(
       /\/角色卡管理器\/index\.js(?:[?#].*)?$/,
       '/角色卡管理器预览/index.html',
-    );
+    ));
   }
 
-  return 'http://127.0.0.1:5500/dist/角色卡管理器预览/index.html';
+  return withLocalCacheBust('http://127.0.0.1:5500/dist/角色卡管理器预览/index.html');
+}
+
+function withLocalCacheBust(url: string): string {
+  try {
+    const parsedUrl = new URL(url, window.location.href);
+    if (!['127.0.0.1', 'localhost', '[::1]'].includes(parsedUrl.hostname)) {
+      return url;
+    }
+    localCacheBustCounter += 1;
+    parsedUrl.searchParams.set('t', `${Date.now()}-${localCacheBustCounter}`);
+    return parsedUrl.toString();
+  } catch {
+    return url;
+  }
 }

@@ -1,29 +1,56 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { filterCharacters, getFilterCount, sortCharacters } from './filters';
-import { loadCharacterOriginalImage, readCharacterDetail, readCharacterList } from './host';
-import type { CharacterDetail, CharacterFilter, CharacterSort, CharacterSummary } from './types';
+import { applyTagMutation, loadCharacterOriginalImage, readCharacterDetail, readCharacterList } from './host';
+import { getTagCounts, previewTagMutation } from './tags';
+import type {
+  CharacterDetail,
+  CharacterFilter,
+  CharacterSort,
+  CharacterSummary,
+  CharacterTag,
+  TagFilterMode,
+  TagMutationAction,
+  TagMutationPreview,
+} from './types';
+
+const DETAIL_LOADING_DELAY_MS = 180;
+const TAG_FILTER_MODE_KEY = 'character-card-manager:tag-filter-mode';
 
 const filters: { id: CharacterFilter; label: string }[] = [
   { id: 'all', label: '全部' },
   { id: 'favorite', label: '收藏' },
   { id: 'worldBook', label: '世界书' },
   { id: 'missingGreeting', label: '缺开场白' },
+  { id: 'untagged', label: '未打标签' },
   { id: 'error', label: '读取异常' },
 ];
 
 const characters = ref<CharacterSummary[]>([]);
+const tavernTags = ref<CharacterTag[]>([]);
+const tagMap = ref<Record<string, string[]>>({});
 const selectedFile = ref('');
 const selectedDetail = ref<CharacterDetail | null>(null);
 const loadingList = ref(false);
 const loadingDetail = ref(false);
 const query = ref('');
 const activeFilter = ref<CharacterFilter>('all');
+const activeTagIds = ref<string[]>([]);
+const tagFilterMode = ref<TagFilterMode>(readStoredTagFilterMode());
+const settingsOpen = ref(false);
 const sortBy = ref<CharacterSort>('date_added');
 const globalIssues = ref<string[]>([]);
 const leftCollapsed = ref(false);
 const rightCollapsed = ref(false);
 const cardSizeIndex = ref(1);
+const selectionMode = ref(false);
+const selectedFiles = ref<Set<string>>(new Set());
+const tagAction = ref<TagMutationAction>('add');
+const selectedTagId = ref('');
+const newTagName = ref('');
+const tagPreview = ref<TagMutationPreview | null>(null);
+const tagStatus = ref('');
+const applyingTags = ref(false);
 const avatarUrlIndex = ref<Record<string, number>>({});
 const originalAvatarUrls = ref<Record<string, string>>({});
 const loadingOriginalAvatars = new Set<string>();
@@ -33,14 +60,35 @@ const cardSizes = [
   { label: '大', width: 216 },
   { label: '特大', width: 268 },
 ];
+let detailRequestId = 0;
+let detailLoadingTimer: ReturnType<typeof setTimeout> | undefined;
 
 const visibleCharacters = computed(() =>
-  sortCharacters(filterCharacters(characters.value, query.value, activeFilter.value), sortBy.value),
+  sortCharacters(
+    filterCharacters(characters.value, query.value, activeFilter.value, activeTagIds.value, tagFilterMode.value),
+    sortBy.value,
+  ),
 );
 
 const selectedSummary = computed(() => characters.value.find(character => character.fileName === selectedFile.value));
-
-const issueCount = computed(() => characters.value.reduce((count, character) => count + character.issues.length, 0));
+const selectedCharacters = computed(() => characters.value.filter(character => selectedFiles.value.has(character.fileName)));
+const selectedFileList = computed(() => selectedCharacters.value.map(character => character.fileName));
+const tagCounts = computed(() => getTagCounts(characters.value));
+const selectedTagDistribution = computed(() =>
+  selectedCharacters.value
+    .flatMap(character => character.tags)
+    .reduce<Record<string, { tag: CharacterTag; count: number }>>((result, tag) => {
+      result[tag.id] = result[tag.id] || { tag, count: 0 };
+      result[tag.id].count += 1;
+      return result;
+    }, {}),
+);
+const selectedFavoriteCount = computed(() => selectedCharacters.value.filter(character => character.fav).length);
+const selectedMissingGreetingCount = computed(() => selectedCharacters.value.filter(character => !character.firstMes).length);
+const selectedErrorCount = computed(() =>
+  selectedCharacters.value.filter(character => character.issues.some(issue => issue.level === 'error')).length,
+);
+const showSelectionSummary = computed(() => selectionMode.value && selectedCharacters.value.length > 0);
 
 const activePreview = computed(() => selectedDetail.value || selectedSummary.value || null);
 const previewRiskIssues = computed(() => activePreview.value?.issues.filter(issue => issue.level !== 'info') || []);
@@ -51,6 +99,10 @@ onMounted(() => {
   void refreshList();
 });
 
+onUnmounted(() => {
+  clearDetailLoadingTimer();
+});
+
 async function refreshList() {
   loadingList.value = true;
   selectedDetail.value = null;
@@ -58,7 +110,12 @@ async function refreshList() {
   try {
     const result = await readCharacterList();
     characters.value = result.characters;
+    tavernTags.value = result.tags;
+    tagMap.value = result.tagMap;
     globalIssues.value = result.issues.map(issue => issue.message);
+    selectedTagId.value = selectedTagId.value || result.tags[0]?.id || '';
+    selectedFiles.value = new Set([...selectedFiles.value].filter(fileName => result.characters.some(character => character.fileName === fileName)));
+    activeTagIds.value = activeTagIds.value.filter(id => result.tags.some(tag => tag.id === id));
     result.characters.forEach(character => {
       void loadOriginalAvatar(character);
     });
@@ -70,14 +127,64 @@ async function refreshList() {
   }
 }
 
+function activateFilter(filter: CharacterFilter) {
+  activeFilter.value = filter;
+  if (filter !== 'all') activeTagIds.value = [];
+}
+
+function activateTagFilter(tagId: string) {
+  activeTagIds.value = activeTagIds.value.includes(tagId)
+    ? activeTagIds.value.filter(id => id !== tagId)
+    : [...activeTagIds.value, tagId];
+  if (activeTagIds.value.length > 0) activeFilter.value = 'all';
+}
+
 async function selectCharacter(character: CharacterSummary) {
+  const requestId = detailRequestId + 1;
+  detailRequestId = requestId;
   selectedFile.value = character.fileName;
   selectedDetail.value = null;
-  loadingDetail.value = true;
+  loadingDetail.value = false;
+  clearDetailLoadingTimer();
+  detailLoadingTimer = setTimeout(() => {
+    if (detailRequestId === requestId) {
+      loadingDetail.value = true;
+    }
+  }, DETAIL_LOADING_DELAY_MS);
   try {
-    selectedDetail.value = await readCharacterDetail(character.fileName, character);
+    const detail = await readCharacterDetail(character.fileName, character);
+    if (detailRequestId === requestId) {
+      selectedDetail.value = detail;
+    }
   } finally {
-    loadingDetail.value = false;
+    if (detailRequestId === requestId) {
+      clearDetailLoadingTimer();
+      loadingDetail.value = false;
+    }
+  }
+}
+
+function setTagFilterMode(mode: TagFilterMode) {
+  tagFilterMode.value = mode;
+  try {
+    localStorage.setItem(TAG_FILTER_MODE_KEY, mode);
+  } catch {
+    // 设置仅影响当前界面筛选，localStorage 不可用时保持内存态。
+  }
+}
+
+function clearDetailLoadingTimer() {
+  if (detailLoadingTimer) {
+    clearTimeout(detailLoadingTimer);
+    detailLoadingTimer = undefined;
+  }
+}
+
+function readStoredTagFilterMode(): TagFilterMode {
+  try {
+    return localStorage.getItem(TAG_FILTER_MODE_KEY) === 'and' ? 'and' : 'or';
+  } catch {
+    return 'or';
   }
 }
 
@@ -123,6 +230,81 @@ function changeCardSize(delta: number) {
   cardSizeIndex.value = Math.min(Math.max(cardSizeIndex.value + delta, 0), cardSizes.length - 1);
 }
 
+function toggleSelectionMode() {
+  selectionMode.value = !selectionMode.value;
+  tagPreview.value = null;
+  tagStatus.value = '';
+  if (!selectionMode.value) {
+    selectedFiles.value = new Set();
+  }
+}
+
+function toggleCharacterSelection(fileName: string) {
+  const next = new Set(selectedFiles.value);
+  if (next.has(fileName)) {
+    next.delete(fileName);
+  } else {
+    next.add(fileName);
+  }
+  selectedFiles.value = next;
+  tagPreview.value = null;
+  tagStatus.value = '';
+}
+
+function selectVisibleCharacters() {
+  selectedFiles.value = new Set([...selectedFiles.value, ...visibleCharacters.value.map(character => character.fileName)]);
+  tagPreview.value = null;
+  tagStatus.value = '';
+}
+
+function clearSelection() {
+  selectedFiles.value = new Set();
+  tagPreview.value = null;
+  tagStatus.value = '';
+}
+
+function buildTagDraft() {
+  return {
+    action: tagAction.value,
+    fileNames: selectedFileList.value,
+    tagId: tagAction.value === 'create' ? undefined : selectedTagId.value,
+    tagName: tagAction.value === 'create' ? newTagName.value : undefined,
+  };
+}
+
+function previewTagChanges() {
+  tagPreview.value = previewTagMutation(tavernTags.value, tagMap.value, buildTagDraft());
+  tagStatus.value = '';
+}
+
+async function confirmTagChanges() {
+  if (!tagPreview.value || tagPreview.value.errors.length > 0) return;
+  applyingTags.value = true;
+  tagStatus.value = '';
+  try {
+    const result = await applyTagMutation(buildTagDraft());
+    tagStatus.value = result.message;
+    tagPreview.value = result.preview;
+    if (result.success) {
+      tagPreview.value = null;
+      await refreshList();
+    }
+  } finally {
+    applyingTags.value = false;
+  }
+}
+
+function formatSelectedTags(): string {
+  const items = Object.values(selectedTagDistribution.value).sort((lhs, rhs) =>
+    rhs.count === lhs.count ? lhs.tag.name.localeCompare(rhs.tag.name, 'zh-CN') : rhs.count - lhs.count,
+  );
+  if (items.length === 0) return '无标签';
+  return items
+    .slice(0, 6)
+    .map(item => `${item.tag.name} ${item.count}`)
+    .join('、');
+}
+
 async function loadOriginalAvatar(character: CharacterSummary | CharacterDetail) {
   if (
     !character.fileName ||
@@ -156,9 +338,17 @@ function requestClose() {
     <header class="cm-header">
       <div>
         <h1>角色卡管理器</h1>
-        <p>{{ characters.length }} 个角色，{{ issueCount }} 条提示</p>
       </div>
       <div class="cm-header-actions" aria-label="面板操作">
+        <button
+          class="cm-icon-button"
+          type="button"
+          title="设置"
+          :aria-pressed="settingsOpen"
+          @click="settingsOpen = true"
+        >
+          ⚙
+        </button>
         <button
           class="cm-icon-button"
           type="button"
@@ -211,12 +401,33 @@ function requestClose() {
             :key="item.id"
             type="button"
             :class="{ active: activeFilter === item.id }"
-            @click="activeFilter = item.id"
+            @click="activateFilter(item.id)"
           >
             <span>{{ item.label }}</span>
             <strong>{{ getFilterCount(characters, item.id) }}</strong>
           </button>
         </div>
+
+        <section class="cm-tag-filter" aria-label="标签筛选">
+          <div class="cm-side-heading">
+            <strong>标签</strong>
+          </div>
+          <div v-if="tavernTags.length === 0" class="cm-side-empty">暂无酒馆标签</div>
+          <button
+            v-for="tag in tavernTags"
+            :key="tag.id"
+            type="button"
+            :class="{ active: activeTagIds.includes(tag.id) }"
+            :aria-pressed="activeTagIds.includes(tag.id)"
+            @click="activateTagFilter(tag.id)"
+          >
+            <span>
+              <i :style="{ background: tag.color || 'oklch(62% 0.16 250)' }"></i>
+              {{ tag.name }}
+            </span>
+            <strong>{{ tagCounts[tag.id] || 0 }}</strong>
+          </button>
+        </section>
 
         <div v-if="globalIssues.length" class="cm-issue-box" role="status">
           <strong>读取提示</strong>
@@ -228,6 +439,21 @@ function requestClose() {
         <div class="cm-list-head">
           <strong>{{ visibleCharacters.length }} 个匹配项</strong>
           <span v-if="loadingList">正在刷新...</span>
+          <div class="cm-list-tools">
+            <button
+              class="cm-selection-toggle"
+              type="button"
+              :aria-pressed="selectionMode"
+              @click="toggleSelectionMode"
+            >
+              {{ selectionMode ? '退出选择' : '选择' }}
+            </button>
+            <template v-if="selectionMode">
+              <button type="button" @click="selectVisibleCharacters">全选当前</button>
+              <button type="button" @click="clearSelection">清空</button>
+              <output>{{ selectedCharacters.length }} 已选</output>
+            </template>
+          </div>
           <div class="cm-gallery-tools" aria-label="卡片大小">
             <button
               type="button"
@@ -254,14 +480,25 @@ function requestClose() {
         </div>
 
         <div v-else class="cm-card-grid" :style="cardGridStyle">
-          <button
+          <article
             v-for="character in visibleCharacters"
             :key="character.fileName"
-            type="button"
+            role="button"
+            tabindex="0"
             class="cm-card"
-            :class="{ active: selectedFile === character.fileName }"
+            :class="{ active: selectedFile === character.fileName, selected: selectedFiles.has(character.fileName) }"
             @click="selectCharacter(character)"
+            @keydown.enter="selectCharacter(character)"
+            @keydown.space.prevent="selectCharacter(character)"
           >
+            <label v-if="selectionMode" class="cm-card-check" @click.stop>
+              <input
+                type="checkbox"
+                :checked="selectedFiles.has(character.fileName)"
+                :aria-label="`选择 ${character.name}`"
+                @change="toggleCharacterSelection(character.fileName)"
+              />
+            </label>
             <span class="cm-thumb">
               <img
                 :src="getAvatarSrc(character)"
@@ -269,21 +506,102 @@ function requestClose() {
                 loading="lazy"
                 @error="handleAvatarError(character)"
               />
+              <span class="cm-card-badges" aria-hidden="true">
+                <b v-if="character.fav" title="收藏">★</b>
+                <b v-if="character.tags.length">{{ character.tags.length }}</b>
+              </span>
             </span>
             <span class="cm-card-text">
               <strong>{{ character.name }}</strong>
+              <small v-if="character.tags.length">
+                {{ character.tags.slice(0, 2).map(tag => tag.name).join('、') }}
+              </small>
             </span>
-          </button>
+          </article>
         </div>
       </section>
 
       <section class="cm-preview" aria-label="角色详情预览" :aria-hidden="rightCollapsed">
-        <div v-if="!activePreview" class="cm-empty">请选择一个角色查看详情。</div>
+        <template v-if="showSelectionSummary">
+          <div class="cm-selection-summary">
+            <h2>{{ selectedCharacters.length }} 个已选角色</h2>
+            <dl class="cm-meta-list compact">
+              <div>
+                <dt>收藏</dt>
+                <dd>{{ selectedFavoriteCount }}</dd>
+              </div>
+              <div>
+                <dt>缺开场</dt>
+                <dd>{{ selectedMissingGreetingCount }}</dd>
+              </div>
+              <div>
+                <dt>异常</dt>
+                <dd>{{ selectedErrorCount }}</dd>
+              </div>
+              <div>
+                <dt>标签</dt>
+                <dd>{{ formatSelectedTags() }}</dd>
+              </div>
+            </dl>
+          </div>
+
+          <section class="cm-tag-editor" aria-label="批量标签操作">
+            <h3>标签操作</h3>
+            <label class="cm-field">
+              <span>操作</span>
+              <select v-model="tagAction" @change="tagPreview = null">
+                <option value="add">添加已有标签</option>
+                <option value="remove">移除已有标签</option>
+                <option value="create">新建并绑定</option>
+              </select>
+            </label>
+            <label v-if="tagAction !== 'create'" class="cm-field">
+              <span>标签</span>
+              <select v-model="selectedTagId" @change="tagPreview = null">
+                <option v-for="tag in tavernTags" :key="tag.id" :value="tag.id">{{ tag.name }}</option>
+              </select>
+            </label>
+            <label v-else class="cm-field">
+              <span>新标签名称</span>
+              <input v-model="newTagName" type="text" placeholder="例如：待整理" @input="tagPreview = null" />
+            </label>
+            <button class="cm-primary-action" type="button" :disabled="selectedCharacters.length === 0" @click="previewTagChanges">
+              预览变更
+            </button>
+
+            <div v-if="tagPreview" class="cm-mutation-preview">
+              <strong>变更预览</strong>
+              <p v-if="tagPreview.errors.length" class="error">{{ tagPreview.errors.join(' ') }}</p>
+              <template v-else>
+                <p>
+                  {{ tagPreview.createsTag ? '新建并绑定' : tagAction === 'remove' ? '移除' : '添加' }}
+                  “{{ tagPreview.tagName }}”，会更新 {{ tagPreview.changedFileNames.length }} 个角色。
+                </p>
+                <p v-if="tagPreview.unchangedFileNames.length">
+                  {{ tagPreview.unchangedFileNames.length }} 个角色无变化。
+                </p>
+                <button
+                  class="cm-primary-action"
+                  type="button"
+                  :disabled="applyingTags || tagPreview.changedFileNames.length === 0"
+                  @click="confirmTagChanges"
+                >
+                  确认写入酒馆标签
+                </button>
+              </template>
+            </div>
+
+            <p v-if="tagStatus" class="cm-inline-status">{{ tagStatus }}</p>
+          </section>
+        </template>
+
+        <div v-else-if="!activePreview" class="cm-empty">请选择一个角色查看详情。</div>
         <template v-else>
           <div class="cm-preview-head">
             <img :src="getAvatarSrc(activePreview)" :alt="activePreview.name" @error="handleAvatarError(activePreview)" />
             <div>
               <h2>{{ activePreview.name }}</h2>
+              <p>{{ activePreview.fav ? '已收藏' : '未收藏' }}</p>
             </div>
           </div>
 
@@ -314,6 +632,12 @@ function requestClose() {
             </div>
           </dl>
 
+          <div class="cm-detail-tags">
+            <strong>标签</strong>
+            <span v-if="activePreview.tags.length === 0">无</span>
+            <span v-for="tag in activePreview.tags" v-else :key="tag.id">{{ tag.name }}</span>
+          </div>
+
           <div v-if="loadingDetail" class="cm-inline-status">正在读取详情...</div>
 
           <div v-if="previewRiskIssues.length" class="cm-risk-list">
@@ -339,6 +663,45 @@ function requestClose() {
         </template>
       </section>
     </section>
+
+    <div v-if="settingsOpen" class="cm-settings-backdrop" role="presentation" @click="settingsOpen = false">
+      <section class="cm-settings" role="dialog" aria-modal="true" aria-labelledby="cm-settings-title" @click.stop>
+        <header>
+          <div>
+            <h2 id="cm-settings-title">设置</h2>
+            <p>筛选和面板行为</p>
+          </div>
+          <button class="cm-icon-button danger" type="button" title="关闭设置" @click="settingsOpen = false">×</button>
+        </header>
+
+        <article class="cm-settings-group">
+          <div>
+            <h3>标签过滤逻辑</h3>
+            <p>选择多个标签时，决定角色需要命中任意标签还是全部标签。</p>
+          </div>
+          <div class="cm-segmented" role="radiogroup" aria-label="标签过滤逻辑">
+            <button
+              type="button"
+              role="radio"
+              :aria-checked="tagFilterMode === 'or'"
+              :class="{ active: tagFilterMode === 'or' }"
+              @click="setTagFilterMode('or')"
+            >
+              或
+            </button>
+            <button
+              type="button"
+              role="radio"
+              :aria-checked="tagFilterMode === 'and'"
+              :class="{ active: tagFilterMode === 'and' }"
+              @click="setTagFilterMode('and')"
+            >
+              且
+            </button>
+          </div>
+        </article>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -401,7 +764,7 @@ function requestClose() {
 
 .cm-header p,
 .cm-preview p,
-.cm-list-head span {
+.cm-list-head > span {
   color: var(--cm-muted);
 }
 
@@ -528,12 +891,35 @@ function requestClose() {
   padding: 0 10px;
 }
 
-.cm-filter-list {
+.cm-filter-list,
+.cm-tag-filter {
   display: grid;
   gap: 6px;
 }
 
-.cm-filter-list button {
+.cm-tag-filter {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--cm-border);
+}
+
+.cm-side-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+  color: var(--cm-muted);
+  font-size: 12px;
+}
+
+.cm-side-empty {
+  color: var(--cm-weak);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cm-filter-list button,
+.cm-tag-filter button {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -545,12 +931,35 @@ function requestClose() {
   cursor: pointer;
 }
 
-.cm-filter-list button.active {
+.cm-tag-filter button {
+  gap: 8px;
+}
+
+.cm-filter-list button.active,
+.cm-tag-filter button.active {
   border-color: var(--cm-accent);
   color: oklch(87% 0.06 250);
 }
 
-.cm-filter-list strong {
+.cm-tag-filter span {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cm-tag-filter i {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.cm-filter-list strong,
+.cm-tag-filter strong {
   color: var(--cm-muted);
   font-size: 12px;
 }
@@ -601,6 +1010,42 @@ function requestClose() {
   margin-left: auto;
 }
 
+.cm-list-tools {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.cm-list-tools button,
+.cm-list-tools output,
+.cm-selection-toggle {
+  min-height: 28px;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-bg);
+  color: var(--cm-text);
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.cm-list-tools button {
+  cursor: pointer;
+}
+
+.cm-selection-toggle[aria-pressed='true'] {
+  border-color: var(--cm-accent);
+  color: oklch(87% 0.06 250);
+}
+
+.cm-list-tools output {
+  display: inline-flex;
+  align-items: center;
+  color: var(--cm-muted);
+}
+
 .cm-gallery-tools {
   display: inline-flex;
   align-items: center;
@@ -647,9 +1092,10 @@ function requestClose() {
 }
 
 .cm-card {
+  position: relative;
   min-width: 0;
   display: grid;
-  grid-template-rows: auto 24px;
+  grid-template-rows: auto minmax(24px, auto);
   gap: 8px;
   width: 100%;
   padding: 8px;
@@ -662,9 +1108,34 @@ function requestClose() {
 }
 
 .cm-card:hover,
-.cm-card.active {
+.cm-card.active,
+.cm-card.selected {
   border-color: var(--cm-accent);
   background: oklch(24% 0.025 250);
+}
+
+.cm-card.selected {
+  box-shadow: inset 0 0 0 1px var(--cm-accent);
+}
+
+.cm-card-check {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: oklch(13% 0.012 248 / 84%);
+  cursor: pointer;
+}
+
+.cm-card-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--cm-accent);
 }
 
 .cm-thumb {
@@ -686,6 +1157,26 @@ function requestClose() {
   background: oklch(13% 0.01 248);
 }
 
+.cm-card-badges {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: inline-flex;
+  gap: 4px;
+}
+
+.cm-card-badges b {
+  min-width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: oklch(13% 0.012 248 / 82%);
+  color: oklch(86% 0.07 250);
+  font-size: 11px;
+  line-height: 1;
+}
+
 .cm-preview-head img {
   width: 100%;
   height: 100%;
@@ -704,6 +1195,16 @@ function requestClose() {
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 24px;
+}
+
+.cm-card-text small {
+  display: block;
+  margin-top: -3px;
+  overflow: hidden;
+  color: var(--cm-weak);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cm-empty,
@@ -738,6 +1239,12 @@ function requestClose() {
   overflow-wrap: anywhere;
 }
 
+.cm-preview-head p {
+  margin: 3px 0 0;
+  color: var(--cm-muted);
+  font-size: 12px;
+}
+
 .cm-meta-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -747,6 +1254,10 @@ function requestClose() {
   border-radius: 6px;
   background: var(--cm-bg);
   overflow: hidden;
+}
+
+.cm-meta-list.compact dd {
+  white-space: normal;
 }
 
 .cm-meta-list div {
@@ -789,6 +1300,81 @@ function requestClose() {
   padding-top: 9px;
 }
 
+.cm-detail-tags,
+.cm-tag-editor,
+.cm-mutation-preview,
+.cm-selection-summary {
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-bg);
+  padding: 10px;
+}
+
+.cm-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.cm-detail-tags strong,
+.cm-tag-editor h3,
+.cm-selection-summary h2 {
+  margin: 0;
+  font-size: 12px;
+}
+
+.cm-detail-tags span {
+  border: 1px solid var(--cm-border);
+  border-radius: 999px;
+  color: var(--cm-muted);
+  padding: 2px 7px;
+  font-size: 12px;
+}
+
+.cm-tag-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.cm-tag-editor .cm-field {
+  margin-bottom: 0;
+}
+
+.cm-primary-action {
+  min-height: 32px;
+  border: 1px solid var(--cm-accent);
+  border-radius: 6px;
+  background: oklch(28% 0.055 250);
+  color: var(--cm-text);
+  cursor: pointer;
+}
+
+.cm-primary-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.cm-mutation-preview {
+  display: grid;
+  gap: 6px;
+}
+
+.cm-mutation-preview p {
+  margin: 0;
+  color: var(--cm-muted);
+  line-height: 1.5;
+}
+
+.cm-mutation-preview .error {
+  color: var(--cm-danger);
+}
+
+.cm-selection-summary {
+  display: grid;
+  gap: 10px;
+}
+
 .cm-section h3 {
   font-size: 12px;
 }
@@ -799,6 +1385,91 @@ function requestClose() {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.cm-settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: oklch(8% 0.01 248 / 76%);
+}
+
+.cm-settings {
+  width: min(560px, 100%);
+  max-height: min(620px, calc(100vh - 36px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid var(--cm-border);
+  border-radius: 8px;
+  background: var(--cm-panel);
+  color: var(--cm-text);
+  overflow: hidden;
+}
+
+.cm-settings > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--cm-border);
+}
+
+.cm-settings h2,
+.cm-settings h3 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.cm-settings h2 {
+  font-size: 18px;
+}
+
+.cm-settings header p,
+.cm-settings-group p {
+  margin: 4px 0 0;
+  color: var(--cm-muted);
+  line-height: 1.45;
+}
+
+.cm-settings-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  padding: 16px;
+}
+
+.cm-settings-group h3 {
+  font-size: 14px;
+}
+
+.cm-segmented {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--cm-border);
+  border-radius: 8px;
+  background: var(--cm-bg);
+}
+
+.cm-segmented button {
+  min-width: 58px;
+  height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--cm-muted);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.cm-segmented button.active {
+  background: oklch(72% 0.045 92);
+  color: oklch(18% 0.014 248);
 }
 
 @media (max-width: 1080px) {
@@ -850,6 +1521,10 @@ function requestClose() {
 
   .cm-meta-list div:nth-last-child(2) {
     border-bottom: 1px solid var(--cm-border);
+  }
+
+  .cm-settings-group {
+    grid-template-columns: 1fr;
   }
 }
 </style>
