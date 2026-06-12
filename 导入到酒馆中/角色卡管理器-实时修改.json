@@ -1,0 +1,12 @@
+{
+  "id": "character-card-manager-live",
+  "name": "角色卡管理器",
+  "content": "import 'http://127.0.0.1:5500/dist/%E8%A7%92%E8%89%B2%E5%8D%A1%E7%AE%A1%E7%90%86%E5%99%A8/index.js'",
+  "info": "只读浏览 MVP：扫描全部角色卡、搜索排序筛选、详情预览。",
+  "buttons": [
+    {
+      "name": "角色卡管理器",
+      "visible": true
+    }
+  ]
+}

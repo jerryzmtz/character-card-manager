@@ -187,12 +187,13 @@ function parse_configuration(entry: Entry): (_env: any, argv: any) => webpack.Co
     .readFileSync(path.join(import.meta.dirname, entry.script), 'utf-8')
     .includes('@obfuscate');
   const script_filepath = path.parse(entry.script);
+  const is_character_manager_script = entry.script.replaceAll('\\', '/').endsWith('src/角色卡管理器/index.ts');
 
   return (_env, argv) => ({
     experiments: {
       outputModule: true,
     },
-    devtool: argv.mode === 'production' ? 'source-map' : 'eval-source-map',
+    devtool: is_character_manager_script ? false : argv.mode === 'production' ? 'source-map' : 'eval-source-map',
     watchOptions: {
       ignored: ['**/dist', '**/node_modules'],
     },
@@ -521,6 +522,11 @@ function parse_configuration(entry: Entry): (_env: any, argv: any) => webpack.Co
     },
     externals: ({ context, request }, callback) => {
       if (!context || !request) {
+        return callback();
+      }
+
+      const is_character_manager = context.includes(path.join('src', '角色卡管理器'));
+      if (is_character_manager && request === 'vue') {
         return callback();
       }
 
