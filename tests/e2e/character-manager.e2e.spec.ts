@@ -415,6 +415,15 @@ test('左右栏可以收起展开，中间缩略图区域随之扩大', async ({
 
   const firstWidth = await page.locator('.cm-list-panel').evaluate(element => Math.round(element.getBoundingClientRect().width));
   const firstCardWidth = await page.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().width));
+  await page.locator('.cm-card-grid').dispatchEvent('wheel', { deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true });
+  await expect
+    .poll(() => page.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().width)))
+    .toBeGreaterThan(firstCardWidth);
+  await page.locator('.cm-card-grid').dispatchEvent('wheel', { deltaY: 100, ctrlKey: true, bubbles: true, cancelable: true });
+  await expect
+    .poll(() => page.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().width)))
+    .toBe(firstCardWidth);
+
   await page.getByTitle('放大卡片').click();
   await expect
     .poll(() => page.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().width)))

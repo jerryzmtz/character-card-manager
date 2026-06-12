@@ -429,6 +429,12 @@ function changeCardSize(delta: number) {
   cardSizeIndex.value = Math.min(Math.max(cardSizeIndex.value + delta, 0), cardSizes.length - 1);
 }
 
+function handleGalleryWheel(event: WheelEvent) {
+  if (!event.ctrlKey || event.deltaY === 0) return;
+  event.preventDefault();
+  changeCardSize(event.deltaY < 0 ? 1 : -1);
+}
+
 function changeGreeting(delta: number) {
   const lastIndex = Math.max(greetingOptions.value.length - 1, 0);
   selectedGreetingIndex.value = Math.min(Math.max(selectedGreetingIndex.value + delta, 0), lastIndex);
@@ -1443,7 +1449,7 @@ function formatError(error: unknown): string {
           没有匹配的角色卡，调整搜索或刷新列表。
         </div>
 
-        <div v-else class="cm-card-grid" :style="cardGridStyle">
+        <div v-else class="cm-card-grid" :style="cardGridStyle" @wheel="handleGalleryWheel">
           <article
             v-for="character in visibleCharacters"
             :key="character.fileName"
