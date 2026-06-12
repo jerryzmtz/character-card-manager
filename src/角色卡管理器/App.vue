@@ -1,11 +1,30 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { filterCharacters, getFilterCounts, sortCharacters } from './filters';
-import { applyTagMutation, loadCharacterOriginalImage, readCharacterDetail, readCharacterList } from './host';
+import {
+  applyCharacterImport,
+  applyCharacterRename,
+  applyFavoriteMutation,
+  applySourceUrlMutation,
+  applyTagMutation,
+  downloadCharacterFile,
+  exportCharactersZip,
+  loadCharacterOriginalImage,
+  previewCharacterRename,
+  readCharacterDetail,
+  readCharacterList,
+} from './host';
+import { buildImportCandidate, canApplyImport, expandImportSources, fetchImportSource } from './imports';
 import { getTagCounts, previewTagMutation } from './tags';
 import type {
   CharacterDetail,
   CharacterFilter,
+  CharacterImportCandidate,
+  CharacterImportDiffGroup,
+  CharacterImportDiffRow,
+  CharacterImportParseInput,
+  CharacterImportSourceKind,
+  CharacterRenamePreview,
   CharacterSort,
   CharacterSummary,
   CharacterTag,
@@ -14,11 +33,18 @@ import type {
   TagMutationPreview,
 } from './types';
 
+interface ImportDiffLine {
+  label: string;
+  value: string;
+  primary: boolean;
+}
+
 const DETAIL_LOADING_DELAY_MS = 180;
 const TAG_FILTER_MODE_KEY = 'character-card-manager:tag-filter-mode';
 
 const sideFilters: { id: CharacterFilter; label: string }[] = [
   { id: 'all', label: '全部' },
+  { id: 'favorite', label: '收藏' },
   { id: 'untagged', label: '无标签' },
 ];
 
@@ -38,6 +64,7 @@ const sortBy = ref<CharacterSort>('date_added');
 const globalIssues = ref<string[]>([]);
 const leftCollapsed = ref(false);
 const rightCollapsed = ref(false);
+const leftCollapsedBeforeImport = ref(false);
 const cardSizeIndex = ref(1);
 const selectedGreetingIndex = ref(0);
 const selectionMode = ref(false);
@@ -48,14 +75,35 @@ const newTagName = ref('');
 const tagPreview = ref<TagMutationPreview | null>(null);
 const tagStatus = ref('');
 const applyingTags = ref(false);
+const applyingFavoriteFiles = ref<Set<string>>(new Set());
+const applyingBatchFavorite = ref(false);
+const exportingFiles = ref(false);
+const managementStatus = ref('');
+const tagDialogOpen = ref(false);
+const detailTagName = ref('');
+const applyingDetailTag = ref(false);
+const sourceUrlDraft = ref('');
+const sourceUrlError = ref('');
+const savingSourceUrl = ref(false);
+const renameOpen = ref(false);
+const renameInput = ref('');
+const applyingRename = ref(false);
 const avatarUrlIndex = ref<Record<string, number>>({});
 const originalAvatarUrls = ref<Record<string, string>>({});
+const importAvatarUrls = ref<Record<string, string>>({});
+const importMode = ref(false);
+const importUrl = ref('');
+const importCandidates = ref<CharacterImportCandidate[]>([]);
+const selectedImportId = ref('');
+const parsingImports = ref(false);
+const applyingImports = ref(false);
+const importStatus = ref('');
 const loadingOriginalAvatars = new Set<string>();
 const cardSizes = [
-  { label: '小', width: 132 },
-  { label: '中', width: 168 },
-  { label: '大', width: 216 },
-  { label: '特大', width: 268 },
+  { label: '小', columns: 8 },
+  { label: '中', columns: 6 },
+  { label: '大', columns: 4 },
+  { label: '特大', columns: 3 },
 ];
 let detailRequestId = 0;
 let detailLoadingTimer: ReturnType<typeof setTimeout> | undefined;
@@ -87,6 +135,7 @@ const selectedErrorCount = computed(() =>
   selectedCharacters.value.filter(character => character.issues.some(issue => issue.level === 'error')).length,
 );
 const showSelectionSummary = computed(() => selectionMode.value && selectedCharacters.value.length > 0);
+const detailActiveTagIds = computed(() => new Set(activePreview.value?.tagIds || []));
 
 const activePreview = computed(() => selectedSummary.value || selectedDetail.value || null);
 const detailPreview = computed(() => {
@@ -105,16 +154,42 @@ const previewFirstMessage = computed(() => {
 const previewAltGreetings = computed(() =>
   detailPreview.value && 'alternate_greetings' in detailPreview.value ? detailPreview.value.alternate_greetings : [],
 );
-const greetingOptions = computed(() =>
-  [previewFirstMessage.value, ...previewAltGreetings.value].map((text, index) => ({
-    label: `开场白 ${index + 1}`,
-    text,
-  })),
-);
+const greetingOptions = computed(() => [previewFirstMessage.value, ...previewAltGreetings.value]);
 const selectedGreeting = computed(() => greetingOptions.value[selectedGreetingIndex.value] || greetingOptions.value[0]);
 const greetingPageLabel = computed(() => `${Math.min(selectedGreetingIndex.value + 1, greetingOptions.value.length)} / ${greetingOptions.value.length}`);
 const cardSize = computed(() => cardSizes[cardSizeIndex.value]);
-const cardGridStyle = computed(() => ({ '--cm-card-min': `${cardSize.value.width}px` }));
+const cardGridStyle = computed(() => ({ '--cm-card-cols': cardSize.value.columns }));
+const selectedImportCandidate = computed(
+  () => importCandidates.value.find(candidate => candidate.id === selectedImportId.value) || importCandidates.value[0] || null,
+);
+const selectedImportDiff = computed(() => filterImportDiff(selectedImportCandidate.value?.diff || []));
+const importReadyCount = computed(() => importCandidates.value.filter(candidate => candidate.status !== 'error').length);
+const importErrorCount = computed(() => importCandidates.value.filter(candidate => candidate.status === 'error').length);
+const canConfirmImports = computed(() => canApplyImport(importCandidates.value) && !parsingImports.value && !applyingImports.value);
+const renamePreview = computed<CharacterRenamePreview | null>(() => {
+  if (!activePreview.value || !renameOpen.value) return null;
+  return previewCharacterRename(activePreview.value, renameInput.value, characters.value);
+});
+const canConfirmRename = computed(() => Boolean(renamePreview.value && renamePreview.value.errors.length === 0 && !applyingRename.value));
+const canOpenSourceUrl = computed(() => /^https?:\/\//i.test(sourceUrlDraft.value.trim()));
+
+watch(
+  () => activePreview.value?.fileName,
+  () => {
+    sourceUrlDraft.value = activePreview.value?.sourceUrl || '';
+    sourceUrlError.value = '';
+  },
+  { immediate: true },
+);
+
+watch(
+  () => activePreview.value?.sourceUrl,
+  value => {
+    if (!savingSourceUrl.value) {
+      sourceUrlDraft.value = value || '';
+    }
+  },
+);
 
 onMounted(() => {
   void refreshList();
@@ -122,6 +197,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   clearDetailLoadingTimer();
+  revokeImportAvatarUrls();
 });
 
 async function refreshList() {
@@ -170,11 +246,29 @@ function clearTagFilters() {
   activeFilter.value = 'all';
 }
 
+function toggleImportMode() {
+  const nextImportMode = !importMode.value;
+  importMode.value = nextImportMode;
+  if (nextImportMode) {
+    leftCollapsedBeforeImport.value = leftCollapsed.value;
+    leftCollapsed.value = true;
+    selectionMode.value = false;
+    selectedFiles.value = new Set();
+    clearTagPreview();
+    resetRenameEditor();
+    closeTagDialog();
+  } else {
+    leftCollapsed.value = leftCollapsedBeforeImport.value;
+  }
+}
+
 async function selectCharacter(character: CharacterSummary) {
   const requestId = detailRequestId + 1;
   detailRequestId = requestId;
   selectedFile.value = character.fileName;
   selectedGreetingIndex.value = 0;
+  resetRenameEditor();
+  closeTagDialog();
   loadingDetail.value = false;
   clearDetailLoadingTimer();
   detailLoadingTimer = setTimeout(() => {
@@ -250,6 +344,10 @@ function getAvatarSrc(character: CharacterSummary | CharacterDetail): string {
   return urls[Math.min(index, urls.length - 1)] || '';
 }
 
+function getImportAvatarSrc(candidate: CharacterImportCandidate): string {
+  return importAvatarUrls.value[candidate.id] || '';
+}
+
 function handleAvatarError(character: CharacterSummary | CharacterDetail) {
   const urls = character.avatarFallbackUrls.length ? character.avatarFallbackUrls : [character.avatarUrl];
   const index = avatarUrlIndex.value[character.fileName] || 0;
@@ -273,6 +371,7 @@ function changeGreeting(delta: number) {
 function toggleSelectionMode() {
   selectionMode.value = !selectionMode.value;
   clearTagPreview();
+  resetRenameEditor();
   if (!selectionMode.value) {
     selectedFiles.value = new Set();
   }
@@ -318,6 +417,75 @@ function clearTagPreview() {
   tagStatus.value = '';
 }
 
+function openTagDialog() {
+  if (!activePreview.value) return;
+  detailTagName.value = '';
+  managementStatus.value = '';
+  tagDialogOpen.value = true;
+}
+
+function closeTagDialog() {
+  tagDialogOpen.value = false;
+  detailTagName.value = '';
+  applyingDetailTag.value = false;
+}
+
+async function removeDetailTag(tag: CharacterTag) {
+  if (!activePreview.value || applyingDetailTag.value) return;
+  applyingDetailTag.value = true;
+  managementStatus.value = '';
+  try {
+    const result = await applyTagMutation({
+      action: 'remove',
+      fileNames: [activePreview.value.fileName],
+      tagId: tag.id,
+    });
+    managementStatus.value = result.message;
+    if (result.success) await refreshList();
+  } finally {
+    applyingDetailTag.value = false;
+  }
+}
+
+async function toggleDetailTag(tag: CharacterTag) {
+  if (!activePreview.value || applyingDetailTag.value) return;
+  applyingDetailTag.value = true;
+  managementStatus.value = '';
+  try {
+    const result = await applyTagMutation({
+      action: detailActiveTagIds.value.has(tag.id) ? 'remove' : 'add',
+      fileNames: [activePreview.value.fileName],
+      tagId: tag.id,
+    });
+    managementStatus.value = result.message;
+    if (result.success) await refreshList();
+  } finally {
+    applyingDetailTag.value = false;
+  }
+}
+
+async function confirmCustomDetailTag() {
+  if (!activePreview.value || applyingDetailTag.value) return;
+  const customName = detailTagName.value.trim();
+  if (!customName) return;
+  applyingDetailTag.value = true;
+  managementStatus.value = '';
+  try {
+    const result = await applyTagMutation({
+      action: 'create',
+      fileNames: [activePreview.value.fileName],
+      tagName: customName,
+    });
+    managementStatus.value = result.message;
+    if (result.success) {
+      detailTagName.value = '';
+      await refreshList();
+    }
+  } finally {
+    applyingDetailTag.value = false;
+  }
+}
+
 async function confirmTagChanges() {
   if (!tagPreview.value || tagPreview.value.errors.length > 0) return;
   applyingTags.value = true;
@@ -332,6 +500,304 @@ async function confirmTagChanges() {
     }
   } finally {
     applyingTags.value = false;
+  }
+}
+
+function setFavoriteBusy(fileName: string, busy: boolean) {
+  const next = new Set(applyingFavoriteFiles.value);
+  if (busy) {
+    next.add(fileName);
+  } else {
+    next.delete(fileName);
+  }
+  applyingFavoriteFiles.value = next;
+}
+
+function setCharacterFavorite(fileName: string, fav: boolean) {
+  characters.value = characters.value.map(character => (character.fileName === fileName ? { ...character, fav } : character));
+  if (selectedDetail.value?.fileName === fileName) {
+    selectedDetail.value = { ...selectedDetail.value, fav };
+  }
+}
+
+function setCharacterSourceUrl(fileName: string, sourceUrl: string) {
+  characters.value = characters.value.map(character => (character.fileName === fileName ? { ...character, sourceUrl } : character));
+  if (selectedDetail.value?.fileName === fileName) {
+    selectedDetail.value = { ...selectedDetail.value, sourceUrl };
+  }
+}
+
+async function saveSourceUrl() {
+  if (!activePreview.value || savingSourceUrl.value) return;
+  const fileName = activePreview.value.fileName;
+  const nextUrl = sourceUrlDraft.value.trim();
+  if (nextUrl === (activePreview.value.sourceUrl || '')) return;
+
+  savingSourceUrl.value = true;
+  sourceUrlError.value = '';
+  try {
+    const result = await applySourceUrlMutation(fileName, nextUrl);
+    if (result.success) {
+      setCharacterSourceUrl(fileName, result.sourceUrl);
+    } else {
+      sourceUrlDraft.value = activePreview.value?.sourceUrl || result.sourceUrl;
+      sourceUrlError.value = result.message;
+    }
+  } finally {
+    savingSourceUrl.value = false;
+  }
+}
+
+async function clearSourceUrl() {
+  if (savingSourceUrl.value || !sourceUrlDraft.value.trim()) return;
+  sourceUrlDraft.value = '';
+  await saveSourceUrl();
+}
+
+function openSourceUrl() {
+  if (!canOpenSourceUrl.value) return;
+  window.open(sourceUrlDraft.value.trim(), '_blank', 'noopener,noreferrer');
+}
+
+async function applyFavoriteChange(character: CharacterSummary, nextFav: boolean, refreshAfterSuccess = true) {
+  if (applyingFavoriteFiles.value.has(character.fileName)) return;
+  managementStatus.value = '';
+  setFavoriteBusy(character.fileName, true);
+  setCharacterFavorite(character.fileName, nextFav);
+  try {
+    const result = await applyFavoriteMutation(character.fileName, nextFav);
+    managementStatus.value = result.message;
+    if (result.success) {
+      if (refreshAfterSuccess) await refreshList();
+    } else {
+      setCharacterFavorite(character.fileName, result.fav);
+    }
+    return result.success;
+  } finally {
+    setFavoriteBusy(character.fileName, false);
+  }
+}
+
+async function toggleFavorite(character: CharacterSummary) {
+  await applyFavoriteChange(character, !character.fav);
+}
+
+async function applyFavoriteToSelection(nextFav: boolean) {
+  const targets = selectedCharacters.value.filter(character => character.fav !== nextFav);
+  if (targets.length === 0 || applyingBatchFavorite.value) {
+    managementStatus.value = nextFav ? '选中角色已经全部收藏。' : '选中角色已经全部取消收藏。';
+    return;
+  }
+  applyingBatchFavorite.value = true;
+  let successCount = 0;
+  const failedNames: string[] = [];
+  try {
+    for (const character of targets) {
+      const success = await applyFavoriteChange(character, nextFav, false);
+      if (success) {
+        successCount += 1;
+      } else {
+        failedNames.push(character.name);
+      }
+    }
+    await refreshList();
+    managementStatus.value = failedNames.length
+      ? `收藏写入完成：成功 ${successCount} 项，失败 ${failedNames.length} 项：${failedNames.slice(0, 3).join('、')}`
+      : `收藏写入完成：成功 ${successCount} 项。`;
+  } finally {
+    applyingBatchFavorite.value = false;
+  }
+}
+
+async function downloadCharacter(character: CharacterSummary) {
+  managementStatus.value = '';
+  const result = await downloadCharacterFile(character.fileName);
+  managementStatus.value = result.message;
+}
+
+async function exportSelectedZip() {
+  if (selectedFileList.value.length === 0 || exportingFiles.value) return;
+  exportingFiles.value = true;
+  managementStatus.value = '';
+  try {
+    const result = await exportCharactersZip(selectedFileList.value);
+    managementStatus.value = result.message;
+  } finally {
+    exportingFiles.value = false;
+  }
+}
+
+function openRenameEditor() {
+  if (!activePreview.value) return;
+  closeTagDialog();
+  renameOpen.value = true;
+  renameInput.value = activePreview.value.name;
+  managementStatus.value = '';
+}
+
+function resetRenameEditor() {
+  renameOpen.value = false;
+  renameInput.value = '';
+  applyingRename.value = false;
+}
+
+async function confirmRename() {
+  if (!renamePreview.value || !canConfirmRename.value) return;
+  applyingRename.value = true;
+  managementStatus.value = '';
+  try {
+    const result = await applyCharacterRename(renamePreview.value);
+    managementStatus.value = result.message;
+    if (result.success && result.newFileName) {
+      selectedFile.value = result.newFileName;
+      selectedFiles.value = new Set([...selectedFiles.value].map(fileName => (fileName === result.oldFileName ? result.newFileName! : fileName)));
+      resetRenameEditor();
+      await refreshList();
+    }
+  } finally {
+    applyingRename.value = false;
+  }
+}
+
+async function handleImportFiles(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (!input.files?.length) return;
+  await addImportFiles(Array.from(input.files));
+  input.value = '';
+}
+
+async function handleImportDrop(event: DragEvent) {
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (files.length > 0) {
+    await addImportFiles(files);
+  }
+}
+
+async function addImportFiles(files: File[]) {
+  parsingImports.value = true;
+  importStatus.value = '';
+  try {
+    for (const file of files) {
+      await addImportSource({ sourceKind: 'file', sourceName: file.name, blob: file, contentType: file.type });
+    }
+  } finally {
+    parsingImports.value = false;
+  }
+}
+
+async function addImportUrl() {
+  const url = importUrl.value.trim();
+  if (!url) return;
+  parsingImports.value = true;
+  importStatus.value = '';
+  try {
+    const source = await fetchImportSource(url);
+    await addImportSource(source);
+    importUrl.value = '';
+  } catch (error) {
+    await addFailedImportCandidate(createEmptyImportSource('url', url), error);
+  } finally {
+    parsingImports.value = false;
+  }
+}
+
+async function addImportSource(source: CharacterImportParseInput) {
+  try {
+    const sources = await expandImportSources(source);
+    for (const item of sources) {
+      const candidate = await buildImportCandidate(item, characters.value, tavernTags.value, tagMap.value, readCharacterDetail);
+      pushImportCandidate(candidate);
+    }
+  } catch (error) {
+    await addFailedImportCandidate(createEmptyImportSource(source.sourceKind, source.sourceName), error);
+  }
+}
+
+function createEmptyImportSource(sourceKind: CharacterImportSourceKind, sourceName: string): CharacterImportParseInput {
+  return {
+    sourceKind,
+    sourceName,
+    blob: new Blob([], { type: 'application/json' }),
+    contentType: 'application/json',
+  };
+}
+
+async function addFailedImportCandidate(source: CharacterImportParseInput, error: unknown) {
+  const message = formatError(error);
+  const candidate = await buildImportCandidate(
+    source,
+    characters.value,
+    tavernTags.value,
+    tagMap.value,
+    readCharacterDetail,
+  );
+  candidate.status = 'error';
+  candidate.issues = [{ level: 'error', message }];
+  candidate.resultMessage = message;
+  pushImportCandidate(candidate);
+}
+
+function pushImportCandidate(candidate: CharacterImportCandidate) {
+  if (candidate.format === 'png' && candidate.blob.size > 0 && typeof URL.createObjectURL === 'function') {
+    importAvatarUrls.value = {
+      ...importAvatarUrls.value,
+      [candidate.id]: URL.createObjectURL(candidate.blob),
+    };
+  }
+  importCandidates.value = [...importCandidates.value, candidate];
+  selectedImportId.value = candidate.id;
+}
+
+function removeImportCandidate(id: string) {
+  revokeImportAvatarUrl(id);
+  importCandidates.value = importCandidates.value.filter(candidate => candidate.id !== id);
+  if (selectedImportId.value === id) {
+    selectedImportId.value = importCandidates.value[0]?.id || '';
+  }
+}
+
+function clearImportCandidates() {
+  revokeImportAvatarUrls();
+  importCandidates.value = [];
+  selectedImportId.value = '';
+  importStatus.value = '';
+}
+
+function revokeImportAvatarUrl(id: string) {
+  const url = importAvatarUrls.value[id];
+  if (!url) return;
+  URL.revokeObjectURL(url);
+  const { [id]: _removed, ...rest } = importAvatarUrls.value;
+  importAvatarUrls.value = rest;
+}
+
+function revokeImportAvatarUrls() {
+  Object.keys(importAvatarUrls.value).forEach(revokeImportAvatarUrl);
+}
+
+async function confirmImports() {
+  if (!canConfirmImports.value) return;
+  applyingImports.value = true;
+  importStatus.value = '';
+  try {
+    const results = await applyCharacterImport(importCandidates.value);
+    importCandidates.value = importCandidates.value.map(candidate => {
+      const result = results.find(item => item.id === candidate.id);
+      if (!result) return candidate;
+      return {
+        ...candidate,
+        status: result.success ? 'success' : 'failed',
+        resultMessage: result.message,
+      };
+    });
+    const successCount = results.filter(result => result.success).length;
+    const failedCount = results.length - successCount;
+    importStatus.value = `导入完成：成功 ${successCount} 项，失败 ${failedCount} 项。`;
+    if (successCount > 0) {
+      await refreshList();
+    }
+  } finally {
+    applyingImports.value = false;
   }
 }
 
@@ -372,6 +838,67 @@ async function loadOriginalAvatar(character: CharacterSummary | CharacterDetail)
 function requestClose() {
   window.parent?.postMessage({ source: 'character-card-manager', type: 'close' }, '*');
 }
+
+function formatImportAction(candidate: CharacterImportCandidate): string {
+  if (candidate.status === 'error') return '解析失败';
+  if (candidate.status === 'success') return '已完成';
+  if (candidate.status === 'failed') return '写入失败';
+  return candidate.action === 'update' ? '更新' : '新增';
+}
+
+function formatImportIssue(candidate: CharacterImportCandidate): string {
+  return candidate.resultMessage || candidate.issues.map(issue => issue.message).join(' ');
+}
+
+function filterImportDiff(groups: CharacterImportDiffGroup[]): CharacterImportDiffGroup[] {
+  return groups
+    .map(group => ({
+      ...group,
+      rows: group.rows.filter(shouldShowImportDiffRow),
+    }))
+    .filter(group => group.rows.length > 0);
+}
+
+function shouldShowImportDiffRow(row: CharacterImportDiffRow): boolean {
+  return row.changed || row.preserved || hasImportDiffValue(row.oldValue) || hasImportDiffValue(row.newValue) || hasImportDiffValue(row.finalValue);
+}
+
+function getImportDiffLines(row: CharacterImportDiffRow): ImportDiffLine[] {
+  const oldValue = hasImportDiffValue(row.oldValue) ? row.oldValue : '';
+  const newValue = hasImportDiffValue(row.newValue) ? row.newValue : '';
+  const finalValue = hasImportDiffValue(row.finalValue) ? row.finalValue : '';
+
+  if (!oldValue && newValue && (!finalValue || finalValue === newValue)) {
+    return [{ label: '新增', value: newValue, primary: true }];
+  }
+  if (!oldValue && !newValue && finalValue) {
+    return [{ label: '说明', value: finalValue, primary: true }];
+  }
+  if (row.preserved && finalValue) {
+    return [{ label: '保留', value: finalValue, primary: true }];
+  }
+  if (oldValue && !newValue && !finalValue) {
+    return [{ label: '移除', value: oldValue, primary: true }];
+  }
+  if (oldValue && (!newValue || newValue === oldValue) && (!finalValue || finalValue === oldValue)) {
+    return [{ label: '不变', value: oldValue, primary: false }];
+  }
+
+  const lines: ImportDiffLine[] = [];
+  if (oldValue) lines.push({ label: '旧', value: oldValue, primary: false });
+  if (newValue && newValue !== oldValue) lines.push({ label: oldValue ? '新' : '新增', value: newValue, primary: !oldValue });
+  if (finalValue && finalValue !== newValue && finalValue !== oldValue) lines.push({ label: '结果', value: finalValue, primary: true });
+  return lines;
+}
+
+function hasImportDiffValue(value: string): boolean {
+  const normalized = value.trim();
+  return normalized !== '' && normalized !== '无';
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error || '未知错误');
+}
 </script>
 
 <template>
@@ -381,6 +908,14 @@ function requestClose() {
         <h1>角色卡管理器</h1>
       </div>
       <div class="cm-header-actions" aria-label="面板操作">
+        <button
+          class="cm-header-primary"
+          type="button"
+          :aria-pressed="importMode"
+          @click="toggleImportMode"
+        >
+          {{ importMode ? '返回角色库' : '导入/更新' }}
+        </button>
         <button
           class="cm-icon-button"
           type="button"
@@ -460,11 +995,10 @@ function requestClose() {
         @click="leftCollapsed = !leftCollapsed"
       ></button>
 
-      <section class="cm-list-panel" aria-label="角色缩略图列表">
-        <div class="cm-list-head">
+      <section class="cm-list-panel" :class="{ 'import-mode': importMode }" aria-label="角色缩略图列表">
+        <div v-if="!importMode" class="cm-list-head">
           <div class="cm-list-status">
             <strong>{{ visibleCharacters.length }} 个匹配项</strong>
-            <span v-if="loadingList">正在刷新...</span>
           </div>
           <label class="cm-field cm-search-field">
             <span>搜索</span>
@@ -480,6 +1014,7 @@ function requestClose() {
           </label>
           <div class="cm-list-tools">
             <button
+              v-if="!importMode"
               class="cm-selection-toggle"
               type="button"
               :aria-pressed="selectionMode"
@@ -514,7 +1049,88 @@ function requestClose() {
           </div>
         </div>
 
-        <div v-if="!loadingList && visibleCharacters.length === 0" class="cm-empty">
+        <section v-if="importMode" class="cm-import-workspace" aria-label="导入和更新预览">
+          <div class="cm-import-sourcebar">
+            <div
+              class="cm-import-drop"
+              @dragover.prevent
+              @drop.prevent="handleImportDrop"
+            >
+              <label class="cm-file-button">
+                <input type="file" accept=".json,.png,.zip,application/json,image/png,application/zip" multiple @change="handleImportFiles" />
+                选择文件
+              </label>
+              <span>拖入文件到此处</span>
+            </div>
+
+            <form class="cm-import-url" @submit.prevent="addImportUrl">
+              <label class="cm-field">
+                <span>URL</span>
+                <input v-model="importUrl" type="url" placeholder="https://example.com/characters.zip" />
+              </label>
+              <button class="cm-primary-action" type="submit" :disabled="parsingImports || !importUrl.trim()">解析</button>
+            </form>
+          </div>
+
+          <div class="cm-import-summary">
+            <strong>{{ importCandidates.length }} 个候选项</strong>
+            <span>{{ importReadyCount }} 可写入 · {{ importErrorCount }} 有错误</span>
+            <span v-if="parsingImports">正在解析...</span>
+            <span v-else-if="applyingImports">正在写入...</span>
+            <span v-if="importStatus">{{ importStatus }}</span>
+            <button type="button" :disabled="importCandidates.length === 0 || applyingImports" @click="clearImportCandidates">
+              清空
+            </button>
+            <button
+              v-if="importCandidates.length > 0"
+              class="cm-primary-action cm-import-confirm"
+              type="button"
+              :disabled="!canConfirmImports"
+              @click="confirmImports"
+            >
+              {{ applyingImports ? '正在写入...' : `确认 ${importReadyCount} 项` }}
+            </button>
+          </div>
+
+          <div v-if="importCandidates.length === 0" class="cm-empty">
+            暂无候选项
+          </div>
+          <div v-else class="cm-import-list">
+            <article
+              v-for="candidate in importCandidates"
+              :key="candidate.id"
+              role="button"
+              tabindex="0"
+              class="cm-import-card"
+              :class="{ active: selectedImportCandidate?.id === candidate.id, error: candidate.status === 'error' || candidate.status === 'failed' }"
+              @click="selectedImportId = candidate.id"
+              @keydown.enter="selectedImportId = candidate.id"
+              @keydown.space.prevent="selectedImportId = candidate.id"
+            >
+              <span class="cm-import-thumb">
+                <img
+                  v-if="getImportAvatarSrc(candidate)"
+                  :src="getImportAvatarSrc(candidate)"
+                  :alt="candidate.summary.name"
+                />
+                <b v-else>{{ candidate.format.toUpperCase() }}</b>
+                <span class="cm-import-card-tags">
+                  <b>{{ candidate.format.toUpperCase() }}</b>
+                  <b>{{ formatImportAction(candidate) }}</b>
+                </span>
+                <button type="button" title="移除此项" @click.stop="removeImportCandidate(candidate.id)">×</button>
+                <span class="cm-import-card-text">
+                  <strong>{{ candidate.summary.name }}</strong>
+                  <small>{{ candidate.sourceName }}</small>
+                  <em v-if="formatImportIssue(candidate)">{{ formatImportIssue(candidate) }}</em>
+                </span>
+              </span>
+            </article>
+          </div>
+
+        </section>
+
+        <div v-else-if="!loadingList && visibleCharacters.length === 0" class="cm-empty">
           没有匹配的角色卡，调整搜索或刷新列表。
         </div>
 
@@ -523,6 +1139,7 @@ function requestClose() {
             v-for="character in visibleCharacters"
             :key="character.fileName"
             role="button"
+            :aria-label="character.name"
             tabindex="0"
             class="cm-card"
             :class="{ active: selectedFile === character.fileName, selected: selectedFiles.has(character.fileName) }"
@@ -545,13 +1162,41 @@ function requestClose() {
                 loading="lazy"
                 @error="handleAvatarError(character)"
               />
+              <span v-if="character.tags.length" class="cm-card-tags" aria-hidden="true">
+                <b v-for="tag in character.tags.slice(0, 8)" :key="tag.id">{{ tag.name }}</b>
+                <b v-if="character.tags.length > 8">+{{ character.tags.length - 8 }}</b>
+              </span>
               <span class="cm-card-badges" aria-hidden="true">
-                <b v-if="character.fav" title="收藏">★</b>
                 <b v-if="character.tags.length">{{ character.tags.length }}</b>
               </span>
-            </span>
-            <span class="cm-card-text">
-              <strong>{{ character.name }}</strong>
+              <span class="cm-card-text">
+                <strong>{{ character.name }}</strong>
+              </span>
+              <span class="cm-card-actions" aria-label="角色快捷操作">
+                <button
+                  type="button"
+                  :title="character.fav ? '取消收藏' : '收藏'"
+                  :aria-label="`${character.fav ? '取消收藏' : '收藏'} ${character.name}`"
+                  :aria-pressed="character.fav"
+                  :disabled="applyingFavoriteFiles.has(character.fileName)"
+                  class="cm-card-action"
+                  :class="{ active: character.fav }"
+                  @click.stop="toggleFavorite(character)"
+                >
+                  {{ character.fav ? '★' : '☆' }}
+                </button>
+                <button
+                  type="button"
+                  title="下载角色卡"
+                  :aria-label="`下载 ${character.name}`"
+                  class="cm-card-action"
+                  @click.stop="downloadCharacter(character)"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M12 3v11m0 0 4-4m-4 4-4-4M5 17v3h14v-3" />
+                  </svg>
+                </button>
+              </span>
             </span>
           </article>
         </div>
@@ -567,7 +1212,49 @@ function requestClose() {
       ></button>
 
       <section class="cm-preview" aria-label="角色详情预览" :aria-hidden="rightCollapsed">
-        <template v-if="showSelectionSummary">
+        <template v-if="importMode">
+          <div v-if="!selectedImportCandidate" class="cm-empty">请选择或解析一个导入候选项。</div>
+          <template v-else>
+            <div class="cm-preview-head">
+              <div class="cm-import-avatar" aria-hidden="true">{{ selectedImportCandidate.format.toUpperCase() }}</div>
+              <div>
+                <h2>{{ selectedImportCandidate.summary.name }}</h2>
+                <p>{{ formatImportAction(selectedImportCandidate) }} · {{ selectedImportCandidate.format.toUpperCase() }} · {{ selectedImportCandidate.fileName }}</p>
+                <p>{{ selectedImportCandidate.sourceName }}</p>
+              </div>
+            </div>
+
+            <div v-if="selectedImportCandidate.issues.length" class="cm-risk-list">
+              <p v-for="issue in selectedImportCandidate.issues" :key="issue.message" :class="issue.level">
+                {{ issue.message }}
+              </p>
+            </div>
+
+            <article
+              v-for="group in selectedImportDiff"
+              :key="group.id"
+              class="cm-section cm-diff-section"
+            >
+              <h3>{{ group.title }}</h3>
+              <dl>
+                <div v-for="row in group.rows" :key="`${group.id}-${row.label}`" :class="{ changed: row.changed, preserved: row.preserved }">
+                  <dt>{{ row.label }}</dt>
+                  <dd>
+                    <component
+                      :is="line.primary ? 'strong' : 'span'"
+                      v-for="line in getImportDiffLines(row)"
+                      :key="`${row.label}-${line.label}`"
+                    >
+                      {{ line.label }}：{{ truncate(line.value, '', line.primary ? 90 : 70) }}
+                    </component>
+                  </dd>
+                </div>
+              </dl>
+            </article>
+          </template>
+        </template>
+
+        <template v-else-if="showSelectionSummary">
           <div class="cm-selection-summary">
             <h2>{{ selectedCharacters.length }} 个已选角色</h2>
             <dl class="cm-meta-list compact">
@@ -588,6 +1275,17 @@ function requestClose() {
                 <dd>{{ formatSelectedTags() }}</dd>
               </div>
             </dl>
+            <div class="cm-management-actions">
+              <button class="cm-secondary-action" type="button" :disabled="selectedCharacters.length === 0 || applyingBatchFavorite" @click="applyFavoriteToSelection(true)">
+                全部收藏
+              </button>
+              <button class="cm-secondary-action" type="button" :disabled="selectedCharacters.length === 0 || applyingBatchFavorite" @click="applyFavoriteToSelection(false)">
+                取消收藏
+              </button>
+              <button class="cm-primary-action" type="button" :disabled="selectedCharacters.length === 0 || exportingFiles" @click="exportSelectedZip">
+                {{ exportingFiles ? '正在导出...' : '导出 ZIP' }}
+              </button>
+            </div>
           </div>
 
           <section class="cm-tag-editor" aria-label="批量标签操作">
@@ -648,7 +1346,41 @@ function requestClose() {
               <h2>{{ activePreview.name }}</h2>
               <p>{{ activePreview.fav ? '已收藏' : '未收藏' }}</p>
             </div>
+            <button class="cm-secondary-action" type="button" @click="openRenameEditor">
+              重命名
+            </button>
           </div>
+
+          <section v-if="renameOpen && renamePreview" class="cm-rename-editor" aria-label="重命名角色">
+            <label class="cm-field">
+              <span>新名称</span>
+              <input v-model="renameInput" type="text" />
+            </label>
+            <dl>
+              <div>
+                <dt>当前</dt>
+                <dd>{{ renamePreview.oldName }} · {{ renamePreview.oldFileName }}</dd>
+              </div>
+              <div>
+                <dt>目标</dt>
+                <dd>{{ renamePreview.sanitizedName || '无效名称' }} · {{ renamePreview.targetFileName || '无效文件名' }}</dd>
+              </div>
+              <div v-if="renamePreview.tagIdsToMove.length">
+                <dt>标签</dt>
+                <dd>将迁移 {{ renamePreview.tagIdsToMove.length }} 个标签绑定</dd>
+              </div>
+            </dl>
+            <p v-for="warning in renamePreview.warnings" :key="warning" class="warning">{{ warning }}</p>
+            <p v-for="error in renamePreview.errors" :key="error" class="error">{{ error }}</p>
+            <div class="cm-management-actions">
+              <button class="cm-primary-action" type="button" :disabled="!canConfirmRename" @click="confirmRename">
+                {{ applyingRename ? '正在重命名...' : '确认重命名' }}
+              </button>
+              <button class="cm-secondary-action" type="button" :disabled="applyingRename" @click="resetRenameEditor">
+                取消
+              </button>
+            </div>
+          </section>
 
           <dl class="cm-meta-list">
             <div>
@@ -680,18 +1412,77 @@ function requestClose() {
           <div class="cm-detail-tags">
             <strong>标签</strong>
             <span v-if="activePreview.tags.length === 0">无</span>
-            <button
-              v-for="tag in activePreview.tags"
-              v-else
-              :key="tag.id"
-              type="button"
-              :class="{ active: activeTagIds.includes(tag.id) }"
-              :aria-pressed="activeTagIds.includes(tag.id)"
-              :title="`筛选标签：${tag.name}`"
-              @click="activateTagFilter(tag.id)"
-            >
-              {{ tag.name }}
+            <span v-for="tag in activePreview.tags" v-else :key="tag.id" class="cm-detail-tag-chip" :class="{ active: activeTagIds.includes(tag.id) }">
+              <button type="button" :aria-pressed="activeTagIds.includes(tag.id)" :title="`筛选标签：${tag.name}`" @click="activateTagFilter(tag.id)">
+                {{ tag.name }}
+              </button>
+              <button type="button" :aria-label="`从 ${activePreview.name} 移除标签 ${tag.name}`" title="移除标签" @click.stop="removeDetailTag(tag)">
+                ×
+              </button>
+            </span>
+            <button class="cm-detail-tag-add" type="button" title="添加标签" aria-label="添加标签" @click="openTagDialog">
+              +
             </button>
+          </div>
+
+          <div class="cm-source-url">
+            <label class="cm-source-field">
+              <span>来源</span>
+              <input
+                v-model="sourceUrlDraft"
+                type="url"
+                inputmode="url"
+                placeholder="Discord / 发布页 URL"
+                :disabled="savingSourceUrl"
+                @blur="saveSourceUrl"
+                @keydown.enter.prevent="saveSourceUrl"
+              />
+            </label>
+            <div class="cm-source-actions">
+              <button type="button" title="打开来源 URL" aria-label="打开来源 URL" :disabled="!canOpenSourceUrl" @click="openSourceUrl">↗</button>
+              <button type="button" title="清除来源 URL" aria-label="清除来源 URL" :disabled="savingSourceUrl || !sourceUrlDraft.trim()" @click="clearSourceUrl">
+                ×
+              </button>
+            </div>
+            <p v-if="sourceUrlError">{{ sourceUrlError }}</p>
+          </div>
+
+          <div v-if="tagDialogOpen" class="cm-tag-dialog-backdrop" role="presentation" @click.self="closeTagDialog">
+            <section class="cm-tag-dialog" role="dialog" aria-modal="true" aria-label="添加标签">
+              <header>
+                <div>
+                  <h3>添加标签</h3>
+                  <p>{{ activePreview.name }}</p>
+                </div>
+                <button type="button" title="关闭" aria-label="关闭添加标签" @click="closeTagDialog">×</button>
+              </header>
+              <div class="cm-tag-choice-grid" aria-label="已有标签">
+                <button
+                  v-for="tag in tavernTags"
+                  :key="tag.id"
+                  type="button"
+                  :aria-pressed="detailActiveTagIds.has(tag.id)"
+                  :class="{ active: detailActiveTagIds.has(tag.id) }"
+                  :disabled="applyingDetailTag"
+                  @click="toggleDetailTag(tag)"
+                >
+                  {{ tag.name }}
+                </button>
+                <p v-if="tavernTags.length === 0" class="cm-dialog-note">当前没有已有标签。</p>
+              </div>
+              <label class="cm-field">
+                <span>自定义标签</span>
+                <input v-model="detailTagName" type="text" placeholder="输入新标签，Enter 添加" @keydown.enter.prevent="confirmCustomDetailTag" />
+              </label>
+              <div class="cm-management-actions">
+                <button class="cm-primary-action" type="button" :disabled="applyingDetailTag || !detailTagName.trim()" @click="confirmCustomDetailTag">
+                  {{ applyingDetailTag ? '正在写入...' : '添加' }}
+                </button>
+                <button class="cm-secondary-action" type="button" :disabled="applyingDetailTag" @click="closeTagDialog">
+                  取消
+                </button>
+              </div>
+            </section>
           </div>
 
           <div v-if="loadingDetail" class="cm-inline-status">正在读取详情...</div>
@@ -742,7 +1533,7 @@ function requestClose() {
               </div>
             </div>
             <div class="cm-greeting-body" aria-label="开场白内容">
-              <p>{{ selectedGreeting.text || (loadingDetail ? '正在读取详情...' : '无内容') }}</p>
+              <p>{{ selectedGreeting || (loadingDetail ? '正在读取详情...' : '无内容') }}</p>
             </div>
           </article>
         </template>
@@ -820,8 +1611,6 @@ function requestClose() {
   --cm-media-bg: oklch(13% 0.01 248);
   --cm-scrim: oklch(13% 0.012 248 / 84%);
   --cm-badge-bg: oklch(13% 0.012 248 / 82%);
-  --cm-scrollbar: oklch(70% 0.018 248 / 42%);
-  --cm-scrollbar-hover: oklch(78% 0.018 248 / 58%);
   --cm-backdrop: oklch(8% 0.01 248 / 76%);
   --cm-primary-bg: oklch(28% 0.055 250);
   --cm-warning: oklch(76% 0.13 82);
@@ -871,15 +1660,9 @@ function requestClose() {
   line-height: 1.25;
 }
 
-.cm-header p,
 .cm-preview p,
 .cm-list-head > span {
   color: var(--cm-muted);
-}
-
-.cm-header p {
-  margin: 3px 0 0;
-  font-size: 12px;
 }
 
 .cm-icon-button {
@@ -890,6 +1673,32 @@ function requestClose() {
   background: var(--cm-panel-2);
   color: var(--cm-text);
   cursor: pointer;
+}
+
+.cm-header-primary {
+  height: 34px;
+  border: 1px solid var(--cm-accent);
+  border-radius: 6px;
+  background: var(--cm-primary-bg);
+  color: var(--cm-text);
+  padding: 0 12px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.cm-header-primary[aria-pressed='true'] {
+  background: var(--cm-accent-bg);
+  color: var(--cm-accent-text);
+}
+
+.cm-header-primary:hover,
+.cm-header-primary:focus-visible {
+  background: var(--cm-accent-bg);
+}
+
+.cm-header-primary:focus-visible {
+  outline: 1px solid var(--cm-accent);
+  outline-offset: 2px;
 }
 
 .cm-icon-button:disabled {
@@ -1203,16 +2012,26 @@ function requestClose() {
 }
 
 .cm-list-panel {
-  overflow: auto;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  scroll-padding-top: 0;
+}
+
+.cm-list-panel.import-mode {
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .cm-list-head {
+  position: relative;
+  z-index: 4;
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
   gap: 10px;
   padding: 11px 12px;
   border-bottom: 1px solid var(--cm-border);
+  background: var(--cm-panel);
   overflow: hidden;
 }
 
@@ -1338,19 +2157,388 @@ function requestClose() {
 
 .cm-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(var(--cm-card-min, 168px), 1fr));
-  gap: 12px;
-  padding: 12px;
+  grid-template-columns: repeat(var(--cm-card-cols, 5), minmax(0, 1fr));
+  gap: 8px;
+  align-items: start;
+  align-content: start;
+  min-height: 0;
+  padding: 10px;
+  overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.cm-import-workspace,
+.cm-card-grid {
+  min-height: 0;
+}
+
+.cm-card-grid::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.cm-import-workspace {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+  overflow: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.cm-import-workspace::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.cm-import-summary,
+.cm-diff-section dl {
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-control-bg);
+}
+
+.cm-import-sourcebar {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.75fr) minmax(360px, 1.25fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  border-bottom: 1px solid var(--cm-border);
+  background: var(--cm-control-bg);
+  padding: 12px 14px;
+}
+
+.cm-import-card em {
+  margin: 0;
+  color: var(--cm-muted);
+  line-height: 1.5;
+}
+
+.cm-import-drop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cm-import-drop span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--cm-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cm-file-button {
+  width: fit-content;
+  min-height: 34px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--cm-accent);
+  border-radius: 6px;
+  background: var(--cm-primary-bg);
+  color: var(--cm-text);
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.cm-file-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.cm-import-url {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.cm-import-url .cm-field {
+  margin-bottom: 0;
+}
+
+.cm-import-summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  border-right: 0;
+  border-left: 0;
+  border-radius: 0;
+  padding: 9px 12px;
+}
+
+.cm-import-summary span {
+  color: var(--cm-muted);
+}
+
+.cm-import-summary button {
+  flex: 0 0 auto;
+}
+
+.cm-import-summary button:first-of-type {
+  margin-left: auto;
+}
+
+.cm-import-summary button,
+.cm-import-card button {
+  min-height: 28px;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-panel-2);
+  color: var(--cm-text);
+  cursor: pointer;
+}
+
+.cm-import-summary .cm-import-confirm {
+  min-height: 34px;
+  border-color: var(--cm-accent);
+  background: var(--cm-accent);
+  color: var(--cm-accent-contrast);
+  padding: 0 14px;
+  font-weight: 800;
+  box-shadow: 0 0 0 1px oklch(92% 0.05 250 / 16%);
+}
+
+.cm-import-summary .cm-import-confirm:hover:not(:disabled),
+.cm-import-summary .cm-import-confirm:focus-visible {
+  filter: brightness(1.08);
+}
+
+.cm-import-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  padding: 10px 12px 12px;
+  overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.cm-import-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.cm-import-card {
+  position: relative;
+  min-width: 0;
+  display: block;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--cm-card-bg);
+  color: var(--cm-text);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.cm-import-card.active {
+  border-color: var(--cm-accent);
+}
+
+.cm-import-card.error {
+  border-color: var(--cm-danger);
+}
+
+.cm-import-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  overflow: hidden;
+  background: var(--cm-media-bg);
+}
+
+.cm-import-thumb::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  height: 54%;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    oklch(13% 0.012 248 / 0%),
+    oklch(11% 0.012 248 / 64%) 42%,
+    oklch(9% 0.012 248 / 94%) 100%
+  );
+}
+
+.cm-import-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--cm-media-bg);
+}
+
+.cm-import-thumb > b {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--cm-muted);
+  font-size: 22px;
+  letter-spacing: 0;
+}
+
+.cm-import-card-tags {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 42px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.cm-import-card-tags b {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid oklch(94% 0.01 248 / 26%);
+  border-radius: 999px;
+  background: oklch(16% 0.012 248 / 66%);
+  color: var(--cm-text);
+  padding: 2px 7px;
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cm-import-card button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+
+.cm-import-card-text {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 58px 11px 11px;
+  pointer-events: none;
+}
+
+.cm-import-card-text strong,
+.cm-import-card-text small,
+.cm-import-card-text em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cm-import-card-text strong {
+  color: var(--cm-text);
+  font-size: 14px;
+  line-height: 1.25;
+  text-shadow: 0 1px 8px oklch(7% 0.01 248 / 82%);
+}
+
+.cm-import-card-text small {
+  color: var(--cm-muted);
+  font-size: 12px;
+}
+
+.cm-import-card-text em {
+  color: var(--cm-warning);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.cm-import-avatar {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-media-bg);
+  color: var(--cm-muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.cm-diff-section dl {
+  display: grid;
+  gap: 0;
+  margin: 8px 0 0;
+  overflow: hidden;
+}
+
+.cm-diff-section div {
+  display: grid;
+  gap: 5px;
+  padding: 8px;
+  border-bottom: 1px solid var(--cm-border);
+}
+
+.cm-diff-section div:last-child {
+  border-bottom: 0;
+}
+
+.cm-diff-section div.changed {
+  background: var(--cm-panel-2);
+}
+
+.cm-diff-section div.preserved {
+  color: var(--cm-accent-text);
+}
+
+.cm-diff-section dt {
+  color: var(--cm-text);
+  font-weight: 800;
+  font-size: 12px;
+}
+
+.cm-diff-section dd {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  color: var(--cm-muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.cm-diff-section dd strong {
+  color: var(--cm-text);
 }
 
 .cm-card {
   position: relative;
   min-width: 0;
-  display: grid;
-  grid-template-rows: auto minmax(24px, auto);
-  gap: 8px;
+  scroll-margin-top: 112px;
+  display: block;
   width: 100%;
-  padding: 8px;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: 8px;
   background: var(--cm-card-bg);
@@ -1363,7 +2551,7 @@ function requestClose() {
 .cm-card.active,
 .cm-card.selected {
   border-color: var(--cm-accent);
-  background: var(--cm-accent-bg);
+  background: var(--cm-card-bg);
 }
 
 .cm-card.selected {
@@ -1372,9 +2560,9 @@ function requestClose() {
 
 .cm-card-check {
   position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 1;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
   display: grid;
   place-items: center;
   width: 28px;
@@ -1395,24 +2583,70 @@ function requestClose() {
   display: block;
   width: 100%;
   aspect-ratio: 3 / 4;
-  border-radius: 6px;
+  border-radius: 8px;
   overflow: hidden;
   background: var(--cm-media-bg);
+}
+
+.cm-thumb::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  height: 48%;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    oklch(13% 0.012 248 / 0%),
+    oklch(11% 0.012 248 / 62%) 46%,
+    oklch(9% 0.012 248 / 92%) 100%
+  );
 }
 
 .cm-thumb img {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
   image-rendering: auto;
   background: var(--cm-media-bg);
 }
 
+.cm-card-tags {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 34px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-height: 39px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.cm-card-tags b {
+  max-width: 100%;
+  min-width: 0;
+  display: inline-block;
+  overflow: hidden;
+  border: 1px solid oklch(94% 0.01 248 / 28%);
+  border-radius: 999px;
+  background: oklch(16% 0.012 248 / 58%);
+  color: var(--cm-text);
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  backdrop-filter: blur(4px);
+}
+
 .cm-card-badges {
   position: absolute;
-  right: 6px;
-  bottom: 6px;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
   display: inline-flex;
   gap: 4px;
 }
@@ -1429,6 +2663,53 @@ function requestClose() {
   line-height: 1;
 }
 
+.cm-card-actions {
+  position: absolute;
+  right: 9px;
+  bottom: 9px;
+  z-index: 4;
+  display: inline-flex;
+  gap: 5px;
+}
+
+.cm-card-action {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid oklch(94% 0.01 248 / 20%);
+  border-radius: 7px;
+  background: var(--cm-badge-bg);
+  color: var(--cm-text);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  backdrop-filter: blur(4px);
+}
+
+.cm-card-action:hover:not(:disabled),
+.cm-card-action:focus-visible,
+.cm-card-action.active {
+  border-color: var(--cm-accent);
+  color: var(--cm-accent-text);
+  background: var(--cm-accent-bg);
+}
+
+.cm-card-action:disabled {
+  cursor: wait;
+  opacity: 0.56;
+}
+
+.cm-card-action svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+}
+
 .cm-preview-head img {
   width: 100%;
   height: 100%;
@@ -1438,7 +2719,14 @@ function requestClose() {
 }
 
 .cm-card-text {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
   min-width: 0;
+  padding: 54px 78px 12px 12px;
+  pointer-events: none;
 }
 
 .cm-card-text strong {
@@ -1446,7 +2734,10 @@ function requestClose() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  line-height: 24px;
+  color: var(--cm-text);
+  font-size: 14px;
+  line-height: 1.3;
+  text-shadow: 0 1px 8px oklch(7% 0.01 248 / 82%);
 }
 
 .cm-empty,
@@ -1465,7 +2756,7 @@ function requestClose() {
 
 .cm-preview-head {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 48px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
 }
@@ -1567,7 +2858,7 @@ function requestClose() {
   font-size: 12px;
 }
 
-.cm-detail-tags span,
+.cm-detail-tags > span:not(.cm-detail-tag-chip),
 .cm-detail-tags button {
   border: 1px solid var(--cm-border);
   border-radius: 999px;
@@ -1594,10 +2885,207 @@ function requestClose() {
   outline-offset: 2px;
 }
 
-.cm-detail-tags button.active {
+.cm-detail-tags .cm-detail-tag-chip.active {
   border-color: var(--cm-accent);
   color: var(--cm-accent-text);
   background: var(--cm-accent-bg);
+}
+
+.cm-detail-tag-chip {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--cm-border);
+  border-radius: 999px;
+  color: var(--cm-muted);
+}
+
+.cm-detail-tag-chip button {
+  min-height: 26px;
+  border: 0;
+  border-radius: 0;
+  padding: 2px 7px;
+}
+
+.cm-detail-tag-chip button:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cm-detail-tag-chip button:last-child {
+  width: 24px;
+  padding: 0;
+  border-left: 1px solid var(--cm-border);
+  color: var(--cm-weak);
+}
+
+.cm-detail-tag-chip.active button {
+  color: var(--cm-accent-text);
+}
+
+.cm-detail-tag-add {
+  width: 28px;
+  min-height: 28px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  font-weight: 900;
+}
+
+.cm-source-url {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: end;
+}
+
+.cm-source-field {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.cm-source-field span {
+  color: var(--cm-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cm-source-field input {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-control-bg);
+  color: var(--cm-text);
+  padding: 0 9px;
+  font: inherit;
+}
+
+.cm-source-field input:focus {
+  border-color: var(--cm-accent);
+  outline: none;
+}
+
+.cm-source-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.cm-source-actions button {
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-control-bg);
+  color: var(--cm-muted);
+  cursor: pointer;
+}
+
+.cm-source-actions button:hover:not(:disabled),
+.cm-source-actions button:focus-visible:not(:disabled) {
+  border-color: var(--cm-accent);
+  color: var(--cm-text);
+  background: var(--cm-panel-2);
+}
+
+.cm-source-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.cm-source-url p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--cm-danger);
+  font-size: 12px;
+}
+
+.cm-tag-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--cm-backdrop);
+}
+
+.cm-tag-dialog {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--cm-border);
+  border-radius: 8px;
+  background: var(--cm-panel);
+  padding: 14px;
+  box-shadow: 0 18px 50px oklch(4% 0.01 248 / 46%);
+}
+
+.cm-tag-dialog header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cm-tag-dialog h3,
+.cm-tag-dialog p {
+  margin: 0;
+}
+
+.cm-tag-dialog header p,
+.cm-dialog-note {
+  color: var(--cm-muted);
+  line-height: 1.45;
+}
+
+.cm-tag-dialog header button {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-control-bg);
+  color: var(--cm-text);
+  cursor: pointer;
+}
+
+.cm-tag-dialog .cm-field {
+  margin-bottom: 0;
+}
+
+.cm-tag-choice-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-height: 36px;
+}
+
+.cm-tag-choice-grid button {
+  min-height: 30px;
+  border: 1px solid var(--cm-border);
+  border-radius: 999px;
+  background: var(--cm-control-bg);
+  color: var(--cm-muted);
+  padding: 0 11px;
+  cursor: pointer;
+}
+
+.cm-tag-choice-grid button:hover,
+.cm-tag-choice-grid button:focus-visible {
+  border-color: var(--cm-accent);
+  color: var(--cm-text);
+}
+
+.cm-tag-choice-grid button.active {
+  border-color: var(--cm-accent);
+  background: var(--cm-accent-bg);
+  color: var(--cm-accent-text);
 }
 
 .cm-tag-editor {
@@ -1609,6 +3097,13 @@ function requestClose() {
   margin-bottom: 0;
 }
 
+.cm-management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 .cm-primary-action {
   min-height: 32px;
   border: 1px solid var(--cm-accent);
@@ -1618,7 +3113,18 @@ function requestClose() {
   cursor: pointer;
 }
 
-.cm-primary-action:disabled {
+.cm-secondary-action {
+  min-height: 30px;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-control-bg);
+  color: var(--cm-text);
+  padding: 0 9px;
+  cursor: pointer;
+}
+
+.cm-primary-action:disabled,
+.cm-secondary-action:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -1641,6 +3147,65 @@ function requestClose() {
 .cm-selection-summary {
   display: grid;
   gap: 10px;
+}
+
+.cm-rename-editor {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-control-bg);
+  padding: 10px;
+}
+
+.cm-rename-editor .cm-field {
+  margin-bottom: 0;
+}
+
+.cm-rename-editor dl {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.cm-rename-editor dl div {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 8px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--cm-border);
+}
+
+.cm-rename-editor dl div:last-child {
+  border-bottom: 0;
+}
+
+.cm-rename-editor dt {
+  color: var(--cm-weak);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.cm-rename-editor dd {
+  margin: 0;
+  color: var(--cm-muted);
+  overflow-wrap: anywhere;
+}
+
+.cm-rename-editor p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.cm-rename-editor .warning {
+  color: var(--cm-warning);
+}
+
+.cm-rename-editor .error {
+  color: var(--cm-danger);
 }
 
 .cm-section h3 {
@@ -1822,7 +3387,11 @@ function requestClose() {
   }
 
   .cm-workspace {
+    display: flex;
+    flex-direction: column;
     grid-template-columns: 1fr;
+    align-items: start;
+    overflow: auto;
   }
 
   .cm-panel-toggle {
@@ -1835,6 +3404,41 @@ function requestClose() {
     grid-template-columns: 1fr;
   }
 
+  .cm-controls,
+  .cm-list-panel,
+  .cm-preview {
+    width: 100%;
+    height: auto;
+    max-height: none;
+  }
+
+  .cm-list-panel {
+    display: block;
+    overflow: hidden;
+  }
+
+  .cm-list-panel.import-mode {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .cm-import-sourcebar {
+    grid-template-columns: 1fr;
+    padding: 10px;
+  }
+
+  .cm-import-summary {
+    flex-wrap: wrap;
+  }
+
+  .cm-import-summary button {
+    margin-left: 0;
+  }
+
+  .cm-import-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .cm-header {
     align-items: flex-start;
   }
@@ -1845,7 +3449,14 @@ function requestClose() {
   }
 
   .cm-card-grid {
-    grid-template-columns: repeat(auto-fill, minmax(min(var(--cm-card-min, 168px), 100%), 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: min(78vh, 680px);
+    overflow: auto;
+  }
+
+  .cm-card {
+    width: 100%;
+    max-width: none;
   }
 
   .cm-list-head {

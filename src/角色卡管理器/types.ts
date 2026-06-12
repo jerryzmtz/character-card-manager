@@ -28,6 +28,7 @@ export interface CharacterSummary {
   creator: string;
   character_version: string;
   character_book: string;
+  sourceUrl: string;
   firstMes: string;
   altGreetingCount: number;
   tokens: number;
@@ -84,4 +85,112 @@ export interface TagMutationResult {
   preview: TagMutationPreview;
   tags: CharacterTag[];
   tagMap: Record<string, string[]>;
+}
+
+export interface CharacterFavoriteMutationResult {
+  success: boolean;
+  message: string;
+  fileName: string;
+  fav: boolean;
+}
+
+export interface CharacterRenamePreview {
+  oldFileName: string;
+  oldName: string;
+  inputName: string;
+  sanitizedName: string;
+  targetFileName: string;
+  tagIdsToMove: string[];
+  errors: string[];
+  warnings: string[];
+}
+
+export interface CharacterRenameResult {
+  success: boolean;
+  message: string;
+  oldFileName: string;
+  newFileName?: string;
+  preview: CharacterRenamePreview;
+}
+
+export interface CharacterExportResult {
+  success: boolean;
+  message: string;
+  fileName: string;
+}
+
+export interface CharacterZipExportResult {
+  success: boolean;
+  message: string;
+  zipFileName: string;
+  exportedFileNames: string[];
+  failedFileNames: string[];
+}
+
+export interface CharacterSourceUrlMutationResult {
+  success: boolean;
+  message: string;
+  fileName: string;
+  sourceUrl: string;
+}
+
+export type CharacterImportSourceKind = 'file' | 'url';
+
+export type CharacterImportFormat = 'json' | 'png';
+
+export type CharacterImportSourceFormat = CharacterImportFormat | 'zip';
+
+export type CharacterImportAction = 'create' | 'update';
+
+export type CharacterImportStatus = 'ready' | 'error' | 'success' | 'failed';
+
+export interface CharacterImportCandidate {
+  id: string;
+  sourceKind: CharacterImportSourceKind;
+  sourceName: string;
+  fileName: string;
+  format: CharacterImportFormat;
+  blob: Blob;
+  raw: Record<string, any>;
+  card: Record<string, any>;
+  summary: CharacterSummary;
+  action: CharacterImportAction;
+  status: CharacterImportStatus;
+  issues: CharacterIssue[];
+  nameConflict?: CharacterSummary;
+  match?: CharacterSummary;
+  existingDetail?: CharacterDetail;
+  mergedRaw: Record<string, any>;
+  importBlob: Blob;
+  diff: CharacterImportDiffGroup[];
+  resultMessage?: string;
+}
+
+export interface CharacterImportDiffGroup {
+  id: string;
+  title: string;
+  rows: CharacterImportDiffRow[];
+}
+
+export interface CharacterImportDiffRow {
+  label: string;
+  oldValue: string;
+  newValue: string;
+  finalValue: string;
+  changed: boolean;
+  preserved?: boolean;
+}
+
+export interface CharacterImportParseInput {
+  sourceKind: CharacterImportSourceKind;
+  sourceName: string;
+  blob: Blob;
+  contentType?: string;
+}
+
+export interface CharacterImportApplyResult {
+  id: string;
+  fileName: string;
+  success: boolean;
+  message: string;
 }

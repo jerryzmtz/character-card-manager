@@ -79,6 +79,31 @@ test.beforeEach(async ({ page }) => {
         window.__dangerousApiCalls.push(String(_url));
       }
       const body = JSON.parse(String(options?.body || '{}'));
+      if (String(_url) === '/api/characters/merge-attributes') {
+        const target = window.characters.find(character => character.avatar === body.avatar);
+        if (target) {
+          if ('fav' in body) target.fav = body.fav;
+          target.data = {
+            ...target.data,
+            ...(body.data || {}),
+            extensions: { ...(target.data.extensions || {}), ...(body.data?.extensions || {}) },
+          };
+          if ('fav' in body) {
+            target.data.fav = body.fav;
+            target.data.extensions.fav = body.fav;
+          }
+        }
+        return { ok: true, status: 200, text: async () => '' };
+      }
+      if (String(_url) === '/api/characters/rename') {
+        const target = window.characters.find(character => character.avatar === body.avatar_url);
+        if (target) {
+          target.avatar = `${body.new_name}.png`;
+          target.name = body.new_name;
+          target.data = { ...target.data, name: body.new_name };
+        }
+        return { ok: true, status: 200, json: async () => ({ avatar: `${body.new_name}.png` }) };
+      }
       const selected = window.characters.find(character => character.avatar === body.avatar_url);
       if (!selected) {
         return { ok: false, status: 404, json: async () => ({}) };
@@ -114,8 +139,8 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   await page.goto(pageUrl);
 
   await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '空白卡' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '莉莉丝', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '空白卡', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '全部 2' })).toBeVisible();
   await expect(page.getByRole('button', { name: '无标签 1' })).toBeVisible();
   await expect(page.getByRole('button', { name: '待整理 1' })).toBeVisible();
@@ -141,13 +166,13 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   expect(bodyText).not.toContain('????');
 
   await page.getByPlaceholder('名称、作者、文件名、描述').fill('莉莉');
-  await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '莉莉丝', exact: true })).toBeVisible();
   await expect(page.getByText('空白卡.png')).toHaveCount(0);
   await page.getByPlaceholder('名称、作者、文件名、描述').fill('待整理');
-  await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '莉莉丝', exact: true })).toBeVisible();
   await page.getByPlaceholder('名称、作者、文件名、描述').fill('');
 
-  await page.getByRole('button', { name: '莉莉丝' }).click();
+  await page.getByRole('button', { name: '莉莉丝', exact: true }).click();
   await expect(page.getByText('夜城里的观察者，负责验证中文 DOM。')).toBeVisible();
   await expect(page.locator('.cm-preview')).toContainText('夜城世界书');
   await expect(page.locator('.cm-preview')).toContainText('待整理');
@@ -215,6 +240,26 @@ test('批量选择会先预览再写入酒馆标签且不调用危险接口', as
   await expect(page.evaluate(() => window.__dangerousApiCalls)).resolves.toEqual([]);
 });
 
+test('卡片收藏即时写入，右侧重命名确认后迁移标签', async ({ page }) => {
+  await page.goto(pageUrl);
+
+  await page.getByRole('button', { name: '收藏 空白卡' }).click();
+  await expect(page.getByRole('button', { name: '取消收藏 空白卡' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.evaluate(() => window.characters.find(character => character.avatar === '空白卡.png')?.fav)).resolves.toBe(true);
+
+  await page.locator('.cm-card', { hasText: '莉莉丝' }).click();
+  await expect(page.locator('.cm-preview')).toContainText('夜城里的观察者');
+  await page.getByRole('button', { name: '重命名' }).click();
+  await page.getByLabel('新名称').fill('新莉莉丝');
+  await expect(page.locator('.cm-rename-editor')).toContainText('新莉莉丝.png');
+  await page.getByRole('button', { name: '确认重命名' }).click();
+
+  await expect(page.getByRole('button', { name: '新莉莉丝', exact: true })).toBeVisible();
+  await expect(page.evaluate(() => window.__tavernContext.tagMap['新莉莉丝.png'])).resolves.toEqual(['整理']);
+  await expect(page.evaluate(() => window.__tavernContext.tagMap['莉莉丝.png'])).resolves.toBeUndefined();
+  await expect.poll(() => page.evaluate(() => window.__saveSettingsCount)).toBe(1);
+});
+
 test('标签筛选支持多选切换，并可在设置里切换或且逻辑', async ({ page }) => {
   await page.goto(pageUrl);
 
@@ -261,7 +306,7 @@ test('移动端宽度下保持单列可读', async ({ page }) => {
   const workspaceColumns = await page.locator('.cm-workspace').evaluate(element => getComputedStyle(element).gridTemplateColumns);
   expect(workspaceColumns.split(' ').length).toBe(1);
   await expect(page.getByText('角色卡管理器')).toBeVisible();
-  await expect(page.getByRole('button', { name: '莉莉丝' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '莉莉丝', exact: true })).toBeVisible();
 });
 
 test('左右栏可以收起展开，中间缩略图区域随之扩大', async ({ page }) => {
