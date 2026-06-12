@@ -5,15 +5,22 @@ import App from '../../src/角色卡管理器/App.vue';
 import { filterCharacters, getFilterCounts, sortCharacters } from '../../src/角色卡管理器/filters';
 import {
   applyCharacterImport,
+  applyCharacterDeletion,
   applyCharacterRename,
   applyFavoriteMutation,
   applySourceUrlMutation,
   applyTagMutation,
+  deleteCharacterChat,
+  downloadCharacterChats,
   downloadCharacterFile,
   exportCharactersZip,
   loadCharacterOriginalImage,
   normalizeSummary,
+  openCharacterChat,
+  previewCharacterDeletion,
   previewCharacterRename,
+  readCharacterChatContent,
+  readCharacterChats,
   readCharacterDetail,
   readCharacterList,
   readTavernTags,
@@ -42,6 +49,7 @@ function makeCharacter(patch: Partial<CharacterSummary> = {}): CharacterSummary 
     creator: '测试作者',
     character_version: '1.0',
     character_book: '',
+    worldBookEmbedded: false,
     sourceUrl: '',
     firstMes: '你好，旅行者。',
     altGreetingCount: 0,
@@ -744,6 +752,205 @@ describe('写入型角色管理', () => {
     createObjectUrl.mockRestore();
     revokeObjectUrl.mockRestore();
   });
+
+  it('聊天记录按酒馆 chatfile 读取内容，并支持单条和批量下载', async () => {
+    let downloadedBlob: Blob | undefined;
+    let downloadedName = '';
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL').mockImplementation(blob => {
+      downloadedBlob = blob;
+      return 'blob:chat-download';
+    });
+    const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    const host = {
+      document: {
+        createElement: () => ({
+          set href(_value: string) {},
+          set download(value: string) {
+            downloadedName = value;
+          },
+          click,
+          remove: vi.fn(),
+        }),
+        body: { appendChild: vi.fn((link: HTMLAnchorElement) => link) },
+      },
+      setTimeout: (callback: TimerHandler) => {
+        if (typeof callback === 'function') callback();
+        return 0;
+      },
+      fetch: vi.fn((url: string, options?: RequestInit) => {
+        const body = JSON.parse(String(options?.body || '{}'));
+        if (url === '/api/characters/chats') {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              '莉莉丝 - 初次聊天.jsonl': { chat_items: 3, last_mes: 1000 },
+              '莉莉丝 - 后续.jsonl': { chat_items: 5, last_mes: 2000 },
+            }),
+          });
+        }
+        if (url === '/api/chats/get') {
+          expect(body.chatfile).toContain('莉莉丝 - ');
+          return Promise.resolve({ ok: true, json: async () => [{ mes: `内容 ${body.chatfile}` }] });
+        }
+        return Promise.resolve({ ok: false, status: 404, text: async () => 'missing' });
+      }),
+    } as unknown as Window & typeof globalThis;
+
+    const chats = await readCharacterChats('莉莉丝.png', host);
+    const content = await readCharacterChatContent('莉莉丝.png', chats[0], host);
+    expect(chats.map(chat => chat.title)).toEqual(['后续', '初次聊天']);
+    expect(content.fileName).toBe('莉莉丝 - 后续.jsonl');
+
+    const single = await downloadCharacterChats('莉莉丝.png', [chats[0].id], host);
+    expect(single.success).toBe(true);
+    expect(single.message).toBe('');
+    expect(downloadedName).toBe('莉莉丝 - 后续.jsonl');
+
+    const all = await downloadCharacterChats('莉莉丝.png', [], host);
+    expect(all.success).toBe(true);
+    expect(downloadedName).toBe('莉莉丝-chats.zip');
+    const files = unzipSync(new Uint8Array(await downloadedBlob!.arrayBuffer()));
+    expect(Object.keys(files)).toContain('莉莉丝 - 初次聊天.jsonl');
+    click.mockRestore();
+    createObjectUrl.mockRestore();
+    revokeObjectUrl.mockRestore();
+  });
+
+  it('启动聊天记录会按酒馆助手签名先选角色再打开 chatfile', async () => {
+    const calls: string[] = [];
+    const context = {
+      characters: [{ avatar: '莉莉丝.png', name: '莉莉丝', data: {} }],
+      selectCharacterById: vi.fn(async id => {
+        calls.push(`select:${id}`);
+      }),
+      openCharacterChat: vi.fn(async chatfile => {
+        calls.push(`open:${chatfile}`);
+      }),
+    };
+    const host = {
+      SillyTavern: { getContext: () => context },
+      setTimeout: (callback: TimerHandler) => {
+        if (typeof callback === 'function') callback();
+        return 0;
+      },
+    } as unknown as Window & typeof globalThis;
+
+    const result = await openCharacterChat('莉莉丝.png', '莉莉丝 - 后续.jsonl', host);
+
+    expect(result.success).toBe(true);
+    expect(calls).toEqual(['select:0', 'open:莉莉丝 - 后续.jsonl']);
+  });
+
+  it('单条删除聊天记录会调用酒馆 chatfile 删除接口', async () => {
+    const host = {
+      fetch: vi.fn((url: string, options?: RequestInit) => {
+        const body = JSON.parse(String(options?.body || '{}'));
+        expect(url).toBe('/api/chats/delete');
+        expect(body).toEqual({ avatar_url: '莉莉丝.png', chatfile: '莉莉丝 - 后续.jsonl' });
+        return Promise.resolve({ ok: true, text: async () => '' });
+      }),
+    } as unknown as Window & typeof globalThis;
+
+    const result = await deleteCharacterChat('莉莉丝.png', {
+      id: '莉莉丝 - 后续.jsonl',
+      fileName: '莉莉丝 - 后续.jsonl',
+      title: '后续',
+      messageCount: 5,
+      updatedAt: 2000,
+    }, host);
+
+    expect(result.success).toBe(true);
+  });
+
+  it('删除预览默认备份并默认删除可确认的内嵌世界书，但跳过共享世界书', async () => {
+    const characters = [
+      makeCharacter({ fileName: '莉莉丝.png', name: '莉莉丝', character_book: '莉莉丝世界书', worldBookEmbedded: true, sourceUrl: 'https://source.test' }),
+      makeCharacter({ fileName: '共享A.png', name: '共享A', character_book: '共享世界书', worldBookEmbedded: true }),
+      makeCharacter({ fileName: '共享B.png', name: '共享B', character_book: '共享世界书', worldBookEmbedded: true }),
+    ];
+    const host = {
+      fetch: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ '莉莉丝 - 初次聊天.jsonl': { chat_items: 3, last_mes: 1000 } }),
+      }),
+    } as unknown as Window & typeof globalThis;
+
+    const preview = await previewCharacterDeletion(['莉莉丝.png', '共享A.png'], {}, characters, host);
+
+    expect(preview.options.backupCharacters).toBe(true);
+    expect(preview.options.deleteChats).toBe(false);
+    expect(preview.options.deleteWorldBooks).toBe(true);
+    expect(preview.requiresDeleteText).toBe(true);
+    expect(preview.targets[0].willDeleteWorldBook).toBe(true);
+    expect(preview.targets[0].chats[0].title).toBe('初次聊天');
+    expect(preview.targets[1].willDeleteWorldBook).toBe(false);
+    expect(preview.targets[1].worldBook.reason).toContain('被其他角色使用');
+  });
+
+  it('确认删除会先备份，再删除聊天、内嵌世界书和角色，并清理 tagMap', async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:delete-backup');
+    const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    const hostCharacter = { avatar: '莉莉丝.png', name: '莉莉丝', data: { character_book: { name: '莉莉丝世界书', entries: [] } } };
+    const context = {
+      characters: [hostCharacter],
+      tags: [{ id: '整理', name: '待整理' }],
+      tagMap: { '莉莉丝.png': ['整理'] },
+      saveSettingsDebounced: vi.fn(),
+      getCharacters: vi.fn(),
+    };
+    const calls: string[] = [];
+    const host = {
+      document,
+      characters: context.characters,
+      SillyTavern: { getContext: () => context },
+      setTimeout: (callback: TimerHandler) => {
+        if (typeof callback === 'function') callback();
+        return 0;
+      },
+      fetch: vi.fn((url: string, options?: RequestInit) => {
+        calls.push(url);
+        if (url.startsWith('/characters/')) {
+          return Promise.resolve({ ok: true, blob: async () => new Blob(['card'], { type: 'image/png' }) });
+        }
+        const body = JSON.parse(String(options?.body || '{}'));
+        if (url === '/api/characters/chats') {
+          return Promise.resolve({ ok: true, json: async () => ({ '莉莉丝 - 初次聊天.jsonl': { chat_items: 1 } }) });
+        }
+        if (url === '/api/chats/delete') {
+          expect(body.chatfile).toBe('莉莉丝 - 初次聊天.jsonl');
+          return Promise.resolve({ ok: true, text: async () => '' });
+        }
+        if (url === '/api/worldinfo/delete') {
+          expect(body.name).toBe('莉莉丝世界书');
+          return Promise.resolve({ ok: true, text: async () => '' });
+        }
+        if (url === '/api/characters/delete') {
+          expect(body.avatar_url).toBe('莉莉丝.png');
+          return Promise.resolve({ ok: true, text: async () => '' });
+        }
+        return Promise.resolve({ ok: false, status: 404, text: async () => 'missing' });
+      }),
+    } as unknown as Window & typeof globalThis;
+
+    const preview = await previewCharacterDeletion(
+      ['莉莉丝.png'],
+      { deleteChats: true },
+      [makeCharacter({ character_book: '莉莉丝世界书', worldBookEmbedded: true })],
+      host,
+    );
+    const results = await applyCharacterDeletion(preview, host);
+
+    expect(results[0]).toMatchObject({ success: true, deletedChats: 1, deletedWorldBook: true });
+    expect(calls.indexOf('/characters/%E8%8E%89%E8%8E%89%E4%B8%9D.png')).toBeLessThan(calls.indexOf('/api/characters/delete'));
+    expect(context.tagMap['莉莉丝.png']).toBeUndefined();
+    expect(context.characters).toHaveLength(0);
+    expect(context.saveSettingsDebounced).toHaveBeenCalled();
+    click.mockRestore();
+    createObjectUrl.mockRestore();
+    revokeObjectUrl.mockRestore();
+  });
 });
 
 describe('角色卡管理器组件', () => {
@@ -951,16 +1158,13 @@ describe('角色卡管理器组件', () => {
     await vi.waitFor(() => expect(wrapper.get('input[placeholder="Discord / 发布页 URL"]').attributes('disabled')).toBeUndefined());
     expect(wrapper.text()).toContain('详情内容');
     expect(wrapper.text()).not.toContain('无内容');
-    await wrapper.get('.cm-preview-head .cm-secondary-action').trigger('click');
-    await wrapper.get('.cm-rename-editor input').setValue('新莉莉丝');
-    const confirmRename = wrapper.findAll('.cm-rename-editor button').find(button => button.text() === '确认重命名');
-    await confirmRename?.trigger('click');
+    await wrapper.get('input[aria-label="角色名称"]').setValue('新莉莉丝');
+    await wrapper.get('input[aria-label="角色名称"]').trigger('keydown.enter');
 
     await vi.waitFor(() => expect(context.tagMap['新莉莉丝.png']).toEqual(['整理']));
-    await vi.waitFor(() => expect(wrapper.find('.cm-rename-editor').exists()).toBe(false));
     expect(context.tagMap['莉莉丝.png']).toBeUndefined();
     expect(context.saveSettingsDebounced).toHaveBeenCalledTimes(1);
-    expect(wrapper.text()).toContain('新莉莉丝');
+    await vi.waitFor(() => expect(wrapper.find('button[aria-label="从 新莉莉丝 移除标签 待整理"]').exists()).toBe(true));
 
     await wrapper.get('button[aria-label="从 新莉莉丝 移除标签 待整理"]').trigger('click');
     await vi.waitFor(() => expect(context.tagMap['新莉莉丝.png']).toEqual([]));

@@ -35,7 +35,7 @@ test.beforeEach(async ({ page }) => {
             '夜城里的观察者，负责验证中文 DOM。'.repeat(120) +
             '\n\n她会带着很长的角色说明，专门验证右侧详情栏使用内部滚动，而不是把整个面板撑高。',
           first_mes: '你好，旅行者。',
-          character_book: '夜城世界书',
+          character_book: { name: '夜城世界书', entries: [{ comment: '入口', content: '内容' }] },
           character_version: '1.0',
         },
       },
@@ -59,6 +59,12 @@ test.beforeEach(async ({ page }) => {
       ],
       tagMap: { '莉莉丝.png': ['整理'], '空白卡.png': [] },
       getCharacters: async () => window.characters,
+      selectCharacterById: async id => {
+        window.this_chid = Number(id);
+      },
+      openCharacterChat: async chatfile => {
+        window.__openedChat = chatfile;
+      },
       saveSettingsDebounced: async () => {
         window.__saveSettingsCount += 1;
       },
@@ -103,6 +109,37 @@ test.beforeEach(async ({ page }) => {
           target.data = { ...target.data, name: body.new_name };
         }
         return { ok: true, status: 200, json: async () => ({ avatar: `${body.new_name}.png` }) };
+      }
+      if (String(_url) === '/api/characters/chats') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            '莉莉丝 - 初次聊天.jsonl': { chat_items: 6, last_mes: 1700000600000 },
+            '莉莉丝 - 夜城后续.jsonl': { chat_items: 12, last_mes: 1700000700000 },
+          }),
+        };
+      }
+      if (String(_url) === '/api/chats/get') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [{ chat_metadata: { note_depth: 4 } }, { name: '莉莉丝', mes: `聊天内容：${body.chatfile}` }],
+        };
+      }
+      if (String(_url) === '/api/chats/delete') {
+        window.__deletedChats = [...(window.__deletedChats || []), body.chatfile];
+        return { ok: true, status: 200, text: async () => '' };
+      }
+      if (String(_url) === '/api/worldinfo/delete') {
+        window.__deletedWorldBooks = [...(window.__deletedWorldBooks || []), body.name];
+        return { ok: true, status: 200, text: async () => '' };
+      }
+      if (String(_url) === '/api/characters/delete') {
+        const index = window.characters.findIndex(character => character.avatar === body.avatar_url);
+        if (index >= 0) window.characters.splice(index, 1);
+        delete window.__tavernContext.tagMap[body.avatar_url];
+        return { ok: true, status: 200, text: async () => '' };
       }
       const selected = window.characters.find(character => character.avatar === body.avatar_url);
       if (!selected) {
@@ -240,7 +277,36 @@ test('批量选择会先预览再写入酒馆标签且不调用危险接口', as
   await expect(page.evaluate(() => window.__dangerousApiCalls)).resolves.toEqual([]);
 });
 
-test('卡片收藏即时写入，右侧重命名确认后迁移标签', async ({ page }) => {
+test('批量删除必须先预览确认，可选删除聊天和内嵌世界书', async ({ page }) => {
+  await page.goto(pageUrl);
+
+  await page.getByRole('button', { name: '选择' }).click();
+  await page.getByRole('button', { name: '全选当前' }).click();
+  await expect(page.getByRole('heading', { name: '2 个已选角色' })).toBeVisible();
+  await expect(page.getByLabel('批量删除')).toContainText('删除导入的内嵌世界书');
+
+  await page.getByLabel('批量删除').getByLabel('同时删除聊天记录').check();
+  await page.getByRole('button', { name: '预览删除' }).click();
+  await expect(page.locator('.cm-delete-preview')).toContainText(/夜城世界书\s*，将删除/);
+  await expect(page.locator('.cm-delete-preview')).toContainText('聊天：2 条，将删除');
+  await expect(page.getByRole('button', { name: '确认删除 2 项' })).toBeDisabled();
+
+  await page.getByLabel('输入 DELETE 确认批量删除').fill('DELETE');
+  await page.getByRole('button', { name: '确认删除 2 项' }).click();
+
+  await expect(page.getByText('删除完成：成功 2 项。')).toBeVisible();
+  await expect(page.getByRole('button', { name: '莉莉丝', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '空白卡', exact: true })).toHaveCount(0);
+  await expect(page.evaluate(() => window.__deletedWorldBooks)).resolves.toEqual(['夜城世界书']);
+  await expect(page.evaluate(() => window.__deletedChats)).resolves.toEqual([
+    '莉莉丝 - 夜城后续.jsonl',
+    '莉莉丝 - 初次聊天.jsonl',
+    '莉莉丝 - 夜城后续.jsonl',
+    '莉莉丝 - 初次聊天.jsonl',
+  ]);
+});
+
+test('卡片收藏即时写入，右侧名称输入后迁移标签', async ({ page }) => {
   await page.goto(pageUrl);
 
   await page.getByRole('button', { name: '收藏 空白卡' }).click();
@@ -249,15 +315,49 @@ test('卡片收藏即时写入，右侧重命名确认后迁移标签', async ({
 
   await page.locator('.cm-card', { hasText: '莉莉丝' }).click();
   await expect(page.locator('.cm-preview')).toContainText('夜城里的观察者');
-  await page.getByRole('button', { name: '重命名' }).click();
-  await page.getByLabel('新名称').fill('新莉莉丝');
-  await expect(page.locator('.cm-rename-editor')).toContainText('新莉莉丝.png');
-  await page.getByRole('button', { name: '确认重命名' }).click();
+  await page.getByLabel('角色名称').fill('新莉莉丝');
+  await page.getByLabel('角色名称').press('Enter');
 
   await expect(page.getByRole('button', { name: '新莉莉丝', exact: true })).toBeVisible();
   await expect(page.evaluate(() => window.__tavernContext.tagMap['新莉莉丝.png'])).resolves.toEqual(['整理']);
   await expect(page.evaluate(() => window.__tavernContext.tagMap['莉莉丝.png'])).resolves.toBeUndefined();
   await expect.poll(() => page.evaluate(() => window.__saveSettingsCount)).toBe(1);
+});
+
+test('聊天记录行支持查看、改名、单条下载、打开和删除', async ({ page }) => {
+  await page.goto(pageUrl);
+
+  await page.locator('.cm-card', { hasText: '莉莉丝' }).click();
+  await page.getByLabel('聊天记录').getByRole('button', { name: '查看' }).click();
+  await expect(page.getByLabel(/聊天名称 夜城后续/)).toBeVisible();
+
+  await page.getByLabel(/聊天名称 夜城后续/).fill('重命名聊天');
+  await page.getByLabel(/聊天名称 夜城后续/).press('Enter');
+  await expect(page.getByLabel('聊天名称 重命名聊天')).toBeVisible();
+
+  await page.getByLabel('查看正文 重命名聊天').click();
+  await expect(page.locator('.cm-chat-content')).toContainText('聊天内容：莉莉丝 - 夜城后续.jsonl');
+  await expect(page.locator('.cm-chat-content')).not.toContainText('chat_metadata');
+  await page.getByLabel('下载聊天 重命名聊天').click();
+  await expect(page.locator('.cm-preview')).not.toContainText('已准备下载');
+  await page.getByLabel('启动聊天 重命名聊天').click();
+  await expect.poll(() => page.evaluate(() => window.__openedChat)).toBe('莉莉丝 - 夜城后续.jsonl');
+
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByLabel('删除聊天 重命名聊天').click();
+  await expect(page.getByLabel('聊天名称 重命名聊天')).toHaveCount(0);
+  await expect(page.evaluate(() => window.__deletedChats)).resolves.toEqual(['莉莉丝 - 夜城后续.jsonl']);
+});
+
+test('右侧详情提供删除入口并进入删除预览', async ({ page }) => {
+  await page.goto(pageUrl);
+
+  await page.locator('.cm-card', { hasText: '莉莉丝' }).click();
+  await page.locator('.cm-preview-head').getByRole('button', { name: '删除' }).click();
+
+  await expect(page.getByRole('heading', { name: '1 个已选角色' })).toBeVisible();
+  await expect(page.locator('.cm-delete-preview')).toContainText('莉莉丝');
+  await expect(page.getByRole('button', { name: '确认删除 1 项' })).toBeEnabled();
 });
 
 test('标签筛选支持多选切换，并可在设置里切换或且逻辑', async ({ page }) => {

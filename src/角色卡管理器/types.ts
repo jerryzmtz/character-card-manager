@@ -28,6 +28,7 @@ export interface CharacterSummary {
   creator: string;
   character_version: string;
   character_book: string;
+  worldBookEmbedded: boolean;
   sourceUrl: string;
   firstMes: string;
   altGreetingCount: number;
@@ -48,6 +49,67 @@ export interface CharacterDetail extends CharacterSummary {
   system_prompt: string;
   creator_notes: string;
   post_history_instructions: string;
+}
+
+export interface CharacterChatSummary {
+  id: string;
+  fileName: string;
+  title: string;
+  messageCount: number;
+  updatedAt: number;
+  sizeBytes: number;
+  canOpen: boolean;
+  canDownload: boolean;
+}
+
+export interface CharacterChatContent {
+  fileName: string;
+  title: string;
+  content: unknown;
+}
+
+export interface CharacterWorldBookLink {
+  name: string;
+  type: 'none' | 'embedded' | 'external' | 'unknown';
+  canDelete: boolean;
+  reason: string;
+  sharedBy: string[];
+}
+
+export interface CharacterDeleteOptions {
+  backupCharacters: boolean;
+  deleteChats: boolean;
+  deleteWorldBooks: boolean;
+}
+
+export interface CharacterDeleteTarget {
+  fileName: string;
+  name: string;
+  sourceUrl: string;
+  tagNames: string[];
+  chatStatus: 'ready' | 'unavailable';
+  chatError: string;
+  chats: CharacterChatSummary[];
+  worldBook: CharacterWorldBookLink;
+  willDeleteChats: boolean;
+  willDeleteWorldBook: boolean;
+  issues: CharacterIssue[];
+}
+
+export interface CharacterDeletePreview {
+  options: CharacterDeleteOptions;
+  targets: CharacterDeleteTarget[];
+  warnings: string[];
+  errors: string[];
+  requiresDeleteText: boolean;
+}
+
+export interface CharacterDeleteApplyResult {
+  fileName: string;
+  success: boolean;
+  message: string;
+  deletedChats: number;
+  deletedWorldBook: boolean;
 }
 
 export interface CharacterListState {

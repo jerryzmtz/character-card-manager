@@ -8,6 +8,12 @@ import {
   previewTagMutation,
 } from './tags';
 import type {
+  CharacterChatSummary,
+  CharacterChatContent,
+  CharacterDeleteApplyResult,
+  CharacterDeleteOptions,
+  CharacterDeletePreview,
+  CharacterDeleteTarget,
   CharacterDetail,
   CharacterExportResult,
   CharacterFavoriteMutationResult,
@@ -20,6 +26,7 @@ import type {
   CharacterSourceUrlMutationResult,
   CharacterSummary,
   CharacterTag,
+  CharacterWorldBookLink,
   CharacterZipExportResult,
   TagMutationDraft,
   TagMutationResult,
@@ -32,11 +39,19 @@ type HostWindow = Window &
     };
     characters?: TavernCharacter[];
     getCharacters?: () => Promise<unknown> | unknown;
+    getChatHistoryBrief?: (fileName: string) => Promise<unknown> | unknown;
     getThumbnailUrl?: (type: string, file: string) => string;
     importRawCharacter?: (filename: string, content: Blob) => Promise<Response>;
+    this_chid?: number | string;
+    loadCharacter?: (id: number | string) => Promise<unknown> | unknown;
+    jQuery?: (element: Element) => { trigger?: (eventName: string) => unknown };
     TavernHelper?: {
       importRawCharacter?: (filename: string, content: Blob) => Promise<Response>;
+      openCharacterChat?: (chatId: string) => Promise<unknown> | unknown;
+      launchChat?: (character: string | { fileName?: string; avatar?: string }, chatId?: string) => Promise<unknown> | unknown;
     };
+    openCharacterChat?: (chatId: string) => Promise<unknown> | unknown;
+    launchChat?: (character: string | { fileName?: string; avatar?: string }, chatId?: string) => Promise<unknown> | unknown;
   };
 
 interface TavernContext {
@@ -45,6 +60,8 @@ interface TavernContext {
   tags?: unknown[];
   tagMap?: Record<string, string[]>;
   saveSettingsDebounced?: () => Promise<unknown> | unknown;
+  openCharacterChat?: (chatId: string) => Promise<unknown> | unknown;
+  selectCharacterById?: (id: number | string, options?: { switchMenu?: boolean }) => Promise<unknown> | unknown;
 }
 
 interface TavernCharacter {
@@ -72,6 +89,11 @@ interface CharacterApiResponse {
   data?: Record<string, any>;
   tokens?: number;
   character_book?: string | { name?: string };
+}
+
+interface ChatApiResponse {
+  chats?: unknown[];
+  data?: unknown[];
 }
 
 interface RenameApiResponse {
@@ -460,6 +482,375 @@ export async function exportCharactersZip(
   };
 }
 
+export async function readCharacterChats(fileName: string, host: HostWindow = getHostWindow()): Promise<CharacterChatSummary[]> {
+  const historyGetter = host.getChatHistoryBrief || (window as HostWindow).getChatHistoryBrief;
+  if (typeof historyGetter === 'function') {
+    try {
+      const chats = normalizeChatList(await historyGetter.call(host, fileName), fileName);
+      if (chats.length > 0) return chats;
+    } catch {
+      // 继续探测酒馆 API。
+    }
+  }
+
+  const endpoints = [
+    { url: '/api/characters/chats', body: { avatar_url: fileName } },
+    { url: '/api/chats/get', body: { avatar_url: fileName } },
+    { url: '/api/chats/list', body: { avatar_url: fileName } },
+  ];
+
+  for (const endpoint of endpoints) {
+    try {
+      const response = await host.fetch(endpoint.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(endpoint.body),
+      });
+      if (!response.ok) continue;
+      const chats = normalizeChatList(await response.json().catch(() => ({})), fileName);
+      return chats;
+    } catch {
+      // 继续探测下一个端点。
+    }
+  }
+
+  throw new Error('当前酒馆环境没有暴露可读取聊天记录列表的接口。');
+}
+
+export async function downloadCharacterChats(
+  fileName: string,
+  chatIds: string[] = [],
+  host: HostWindow = getHostWindow(),
+): Promise<CharacterExportResult> {
+  try {
+    const chats = await readCharacterChats(fileName, host);
+    const filtered = chatIds.length > 0 ? chats.filter(chat => chatIds.includes(chat.id)) : chats;
+    if (filtered.length === 0) {
+      return { success: false, message: '没有可下载的聊天记录。', fileName };
+    }
+    const contents = await Promise.all(filtered.map(chat => readCharacterChatContent(fileName, chat, host)));
+    if (contents.length === 1) {
+      const chat = contents[0];
+      triggerDownload(toChatBlob(chat.content), getChatDownloadFileName(chat), host);
+    } else {
+      const files = Object.fromEntries(
+        contents.map(chat => [getChatDownloadFileName(chat), new Uint8Array(new TextEncoder().encode(formatChatContent(chat.content)))]),
+      );
+      triggerDownload(new Blob([zipSync(files)], { type: 'application/zip' }), `${stripExtension(fileName)}-chats.zip`, host);
+    }
+    return {
+      success: true,
+      message: '',
+      fileName,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message: `聊天记录下载失败：${formatError(error)}`,
+      fileName,
+    };
+  }
+}
+
+export async function readCharacterChatContent(
+  fileName: string,
+  chat: CharacterChatSummary | string,
+  host: HostWindow = getHostWindow(),
+): Promise<CharacterChatContent> {
+  const chatFileName = typeof chat === 'string' ? chat : chat.fileName;
+  const title = typeof chat === 'string' ? getChatTitleFromFileName(chat, fileName) : chat.title;
+  const response = await fetchFirstOk(
+    [
+      { url: '/api/chats/get', body: { avatar_url: fileName, chatfile: chatFileName } },
+      { url: '/api/chats/get', body: { avatar_url: fileName, file_name: chatFileName } },
+    ],
+    host,
+  );
+  if (!response.ok) {
+    throw new Error(await getResponseError(response, `聊天记录读取失败：${title || chatFileName}`));
+  }
+  return {
+    fileName: chatFileName,
+    title,
+    content: await response.json().catch(() => ({})),
+  };
+}
+
+export async function deleteCharacterChat(
+  fileName: string,
+  chat: CharacterChatSummary | string,
+  host: HostWindow = getHostWindow(),
+): Promise<CharacterExportResult> {
+  const chatFileName = typeof chat === 'string' ? chat : chat.fileName;
+  const chatId = typeof chat === 'string' ? chat : chat.id;
+  try {
+    const response = await fetchFirstOk(
+      [
+        { url: '/api/chats/delete', body: { avatar_url: fileName, chatfile: chatFileName } },
+        { url: '/api/chats/delete', body: { avatar_url: fileName, chat_id: chatId, file_name: chatFileName } },
+      ],
+      host,
+    );
+    if (!response.ok) {
+      throw new Error(await getResponseError(response, `聊天记录删除失败：${chatFileName}`));
+    }
+    return { success: true, message: '', fileName };
+  } catch (error) {
+    return {
+      success: false,
+      message: `聊天记录删除失败：${formatError(error)}`,
+      fileName,
+    };
+  }
+}
+
+export async function openCharacterChat(
+  fileName: string,
+  chatFileName: string,
+  host: HostWindow = getHostWindow(),
+): Promise<CharacterExportResult> {
+  try {
+    const context = getContext(host);
+    const helper = host.TavernHelper || host;
+    const opener = host.TavernHelper?.openCharacterChat || host.openCharacterChat;
+    const contextOpener = context?.openCharacterChat;
+    const launcher = host.TavernHelper?.launchChat || host.launchChat;
+    if (typeof launcher === 'function') {
+      await launcher.call(helper, { fileName, avatar: fileName }, chatFileName);
+      return { success: true, message: '', fileName };
+    }
+    await selectHostCharacter(fileName, host, context);
+    if (typeof contextOpener === 'function') {
+      await contextOpener.call(context, chatFileName);
+      return { success: true, message: '', fileName };
+    }
+    if (typeof opener === 'function') {
+      await opener.call(helper, chatFileName);
+      return { success: true, message: '', fileName };
+    }
+    if (openChatByDom(chatFileName, host)) {
+      return { success: true, message: '', fileName };
+    }
+    {
+      throw new Error('当前酒馆环境没有暴露打开聊天记录的接口。');
+    }
+  } catch (error) {
+    return {
+      success: false,
+      message: `打开聊天失败：${formatError(error)}`,
+      fileName,
+    };
+  }
+}
+
+async function selectHostCharacter(fileName: string, host: HostWindow, context: TavernContext | undefined) {
+  const source = context?.characters || host.characters || [];
+  const characterIndex = source.findIndex(character => getCharacterFileName(character) === fileName);
+  if (characterIndex < 0) {
+    throw new Error(`角色卡不在当前酒馆列表中：${fileName}`);
+  }
+  if (String(host.this_chid ?? '') === String(characterIndex)) return;
+
+  const domButton = host.document?.getElementById(`CharID${characterIndex}`);
+  if (domButton instanceof HTMLElement) {
+    domButton.click();
+    await waitForHost(host, 250);
+    return;
+  }
+  if (typeof context?.selectCharacterById === 'function') {
+    await context.selectCharacterById(characterIndex, { switchMenu: false });
+    await waitForHost(host, 250);
+    return;
+  }
+  if (typeof host.loadCharacter === 'function') {
+    await host.loadCharacter(characterIndex);
+    await waitForHost(host, 250);
+    return;
+  }
+}
+
+function openChatByDom(chatFileName: string, host: HostWindow): boolean {
+  const doc = host.document;
+  if (!doc) return false;
+  const button = doc.createElement('div');
+  button.className = 'select_chat_block';
+  button.setAttribute('file_name', chatFileName);
+  button.style.display = 'none';
+  doc.body.appendChild(button);
+  try {
+    const trigger = host.jQuery?.(button).trigger;
+    if (typeof trigger === 'function') {
+      trigger.call(host.jQuery?.(button), 'click');
+      return true;
+    }
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: host }));
+    return true;
+  } finally {
+    host.setTimeout(() => button.remove(), 1000);
+  }
+}
+
+function waitForHost(host: HostWindow, ms: number): Promise<void> {
+  return new Promise(resolve => host.setTimeout(resolve, ms));
+}
+
+export async function previewCharacterDeletion(
+  fileNames: string[],
+  options: Partial<CharacterDeleteOptions> = {},
+  characters?: CharacterSummary[],
+  host: HostWindow = getHostWindow(),
+): Promise<CharacterDeletePreview> {
+  const deleteOptions: CharacterDeleteOptions = {
+    backupCharacters: options.backupCharacters ?? true,
+    deleteChats: options.deleteChats ?? false,
+    deleteWorldBooks: options.deleteWorldBooks ?? true,
+  };
+  const list = characters || (await readCharacterList(host)).characters;
+  const uniqueFileNames = Array.from(new Set(fileNames.filter(Boolean)));
+  const targets: CharacterDeleteTarget[] = [];
+  const warnings: string[] = [];
+  const errors: string[] = [];
+
+  for (const fileName of uniqueFileNames) {
+    const summary = list.find(character => character.fileName === fileName) || normalizeSummary({ avatar: fileName }, host);
+    let chats: CharacterChatSummary[] = [];
+    let chatStatus: CharacterDeleteTarget['chatStatus'] = 'ready';
+    let chatError = '';
+    try {
+      chats = await readCharacterChats(fileName, host);
+    } catch (error) {
+      chatStatus = 'unavailable';
+      chatError = formatError(error);
+    }
+    const worldBook = readCharacterWorldBookLink(summary, list);
+    const willDeleteChats = deleteOptions.deleteChats && chatStatus === 'ready' && chats.length > 0;
+    const willDeleteWorldBook = deleteOptions.deleteWorldBooks && worldBook.canDelete;
+    const issues: CharacterIssue[] = [];
+    if (deleteOptions.deleteChats && chatStatus === 'unavailable') {
+      issues.push({ level: 'warning', message: `聊天记录不会删除：${chatError}` });
+    }
+    if (deleteOptions.deleteWorldBooks && summary.character_book && !worldBook.canDelete) {
+      issues.push({ level: 'warning', message: `世界书不会删除：${worldBook.reason}` });
+    }
+
+    targets.push({
+      fileName,
+      name: summary.name,
+      sourceUrl: summary.sourceUrl,
+      tagNames: summary.tags.map(tag => tag.name),
+      chatStatus,
+      chatError,
+      chats,
+      worldBook,
+      willDeleteChats,
+      willDeleteWorldBook,
+      issues,
+    });
+  }
+
+  if (uniqueFileNames.length === 0) {
+    errors.push('请选择要删除的角色。');
+  }
+  if (deleteOptions.deleteChats && targets.some(target => target.chatStatus === 'unavailable')) {
+    warnings.push('部分角色无法读取聊天记录，已自动跳过聊天删除。');
+  }
+  if (deleteOptions.deleteWorldBooks && targets.some(target => target.worldBook.type !== 'none' && !target.worldBook.canDelete)) {
+    warnings.push('部分世界书无法确认归属或被其他角色使用，已自动跳过。');
+  }
+
+  return {
+    options: deleteOptions,
+    targets,
+    warnings,
+    errors,
+    requiresDeleteText: targets.length > 1,
+  };
+}
+
+export function readCharacterWorldBookLink(character: CharacterSummary, characters: CharacterSummary[] = []): CharacterWorldBookLink {
+  const name = character.character_book;
+  if (!name) {
+    return { name: '', type: 'none', canDelete: false, reason: '无关联世界书。', sharedBy: [] };
+  }
+
+  const sharedBy = characters
+    .filter(item => item.fileName !== character.fileName && item.character_book === name)
+    .map(item => item.name);
+  if (sharedBy.length > 0) {
+    return { name, type: 'external', canDelete: false, reason: `被其他角色使用：${sharedBy.join('、')}`, sharedBy };
+  }
+
+  const embedded = isEmbeddedWorldBook(character);
+  return {
+    name,
+    type: embedded ? 'embedded' : 'unknown',
+    canDelete: embedded,
+    reason: embedded ? '可确认来自角色卡内嵌世界书。' : '只有世界书名称，无法确认是否为角色专属。',
+    sharedBy,
+  };
+}
+
+export async function applyCharacterDeletion(
+  preview: CharacterDeletePreview,
+  host: HostWindow = getHostWindow(),
+): Promise<CharacterDeleteApplyResult[]> {
+  if (preview.errors.length > 0) {
+    return preview.targets.map(target => ({
+      fileName: target.fileName,
+      success: false,
+      message: preview.errors.join(' '),
+      deletedChats: 0,
+      deletedWorldBook: false,
+    }));
+  }
+
+  if (preview.options.backupCharacters) {
+    const backup = await exportCharactersZip(preview.targets.map(target => target.fileName), host);
+    if (!backup.exportedFileNames.length) {
+      return preview.targets.map(target => ({
+        fileName: target.fileName,
+        success: false,
+        message: `备份失败，已取消删除：${backup.message}`,
+        deletedChats: 0,
+        deletedWorldBook: false,
+      }));
+    }
+  }
+
+  const results: CharacterDeleteApplyResult[] = [];
+  for (const target of preview.targets) {
+    let deletedChats = 0;
+    let deletedWorldBook = false;
+    try {
+      if (target.willDeleteChats) {
+        deletedChats = await deleteCharacterChats(target, host);
+      }
+      if (target.willDeleteWorldBook) {
+        deletedWorldBook = await deleteCharacterWorldBook(target.worldBook.name, host);
+      }
+      await deleteCharacterFile(target.fileName, host);
+      await cleanupDeletedCharacter(target.fileName, host);
+      results.push({
+        fileName: target.fileName,
+        success: true,
+        message: `已删除 ${target.name}。`,
+        deletedChats,
+        deletedWorldBook,
+      });
+    } catch (error) {
+      results.push({
+        fileName: target.fileName,
+        success: false,
+        message: `删除失败：${formatError(error)}`,
+        deletedChats,
+        deletedWorldBook,
+      });
+    }
+  }
+  await refreshHostCharacters(host);
+  return results;
+}
+
 export async function applyCharacterImport(
   candidates: CharacterImportCandidate[],
   host: HostWindow = getHostWindow(),
@@ -599,6 +990,164 @@ function getImportMimeType(candidate: CharacterImportCandidate): string {
   return candidate.format === 'png' ? 'image/png' : 'application/json';
 }
 
+function normalizeChatSummary(chat: unknown, fileName: string, index: number): CharacterChatSummary {
+  const record = chat && typeof chat === 'object' ? (chat as Record<string, any>) : {};
+  const chatFileName = stringValue(record.file_name || record.fileName || record.filename);
+  const id = stringValue(record.id || chatFileName || record.name || record.title || `chat-${index + 1}`);
+  const title = stringValue(record.title || record.name) || getChatTitleFromFileName(chatFileName, fileName) || `聊天 ${index + 1}`;
+  const messages = Array.isArray(record.messages)
+    ? record.messages.length
+    : numberValue(record.messageCount || record.messages_count || record.chat_items || record.mes_count || record.count);
+  return {
+    id,
+    fileName: chatFileName || id,
+    title,
+    messageCount: messages,
+    updatedAt: numberValue(record.updatedAt || record.updated_at || record.last_mes || record.date_last_chat || record.mtime),
+    sizeBytes: numberValue(record.size || record.sizeBytes || record.size_bytes),
+    canOpen: true,
+    canDownload: true,
+  };
+}
+
+function getChatTitleFromFileName(chatFileName: string, characterFileName: string): string {
+  if (!chatFileName) return '';
+  const characterName = stripExtension(characterFileName);
+  let title = stripExtension(chatFileName);
+  if (characterName && title.startsWith(`${characterName} - `)) {
+    title = title.slice(characterName.length + 3);
+  }
+  return title || chatFileName;
+}
+
+function getChatDownloadFileName(chat: CharacterChatContent): string {
+  const fileName = chat.fileName || `${chat.title || 'chat'}.jsonl`;
+  return /\.[^.]+$/.test(fileName) ? fileName : `${fileName}.json`;
+}
+
+function toChatBlob(content: unknown): Blob {
+  return new Blob([formatChatContent(content)], { type: 'application/json' });
+}
+
+function formatChatContent(content: unknown): string {
+  return typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+}
+
+function normalizeChatList(payload: unknown, fileName: string): CharacterChatSummary[] {
+  const rawChats = getRawChatItems(payload);
+  const seen = new Set<string>();
+  return rawChats
+    .map((chat, index) => normalizeChatSummary(chat, fileName, index))
+    .filter(chat => {
+      const key = stripExtension(chat.fileName || chat.id);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function getRawChatItems(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [];
+  const response = payload as ChatApiResponse & Record<string, unknown>;
+  if (Array.isArray(response.chats)) return response.chats;
+  if (Array.isArray(response.data)) return response.data;
+  return Object.entries(response).map(([fileName, value]) =>
+    value && typeof value === 'object' ? { file_name: fileName, ...(value as Record<string, unknown>) } : { file_name: fileName },
+  );
+}
+
+async function deleteCharacterChats(target: CharacterDeleteTarget, host: HostWindow): Promise<number> {
+  let deleted = 0;
+  for (const chat of target.chats) {
+    const response = await fetchFirstOk(
+      [
+        { url: '/api/chats/delete', body: { avatar_url: target.fileName, chatfile: chat.fileName || chat.id } },
+        { url: '/api/chats/delete', body: { avatar_url: target.fileName, chat_id: chat.id, file_name: chat.fileName } },
+        { url: '/api/chats/remove', body: { avatar_url: target.fileName, chat_id: chat.id, file_name: chat.fileName } },
+      ],
+      host,
+    );
+    if (!response.ok) {
+      throw new Error(await getResponseError(response, `聊天记录删除失败：${chat.title}`));
+    }
+    deleted += 1;
+  }
+  return deleted;
+}
+
+async function deleteCharacterWorldBook(name: string, host: HostWindow): Promise<boolean> {
+  if (!name) return false;
+  const response = await fetchFirstOk(
+    [
+      { url: '/api/worldinfo/delete', body: { name } },
+      { url: '/api/worldinfo/delete-world-info', body: { name } },
+      { url: '/api/worldinfo/edit', body: { name, delete: true } },
+    ],
+    host,
+  );
+  if (!response.ok) {
+    throw new Error(await getResponseError(response, `世界书删除失败：${name}`));
+  }
+  return true;
+}
+
+async function deleteCharacterFile(fileName: string, host: HostWindow): Promise<void> {
+  const response = await fetchFirstOk(
+    [
+      { url: '/api/characters/delete', body: { avatar_url: fileName, delete_chats: false } },
+      { url: '/api/characters/delete', body: { avatar: fileName } },
+    ],
+    host,
+  );
+  if (!response.ok) {
+    throw new Error(await getResponseError(response, `角色删除失败：${fileName}`));
+  }
+  removeHostCharacter(fileName, host);
+}
+
+async function fetchFirstOk(endpoints: { url: string; body: Record<string, unknown> }[], host: HostWindow): Promise<Response> {
+  let lastResponse: Response | undefined;
+  let lastError: unknown;
+  for (const endpoint of endpoints) {
+    try {
+      const response = await host.fetch(endpoint.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(endpoint.body),
+      });
+      lastResponse = response;
+      if (response.ok) return response;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastResponse) return lastResponse;
+  throw lastError instanceof Error ? lastError : new Error('宿主接口不可用。');
+}
+
+async function cleanupDeletedCharacter(fileName: string, host: HostWindow) {
+  const context = getContext(host);
+  if (context?.tagMap && Object.prototype.hasOwnProperty.call(context.tagMap, fileName)) {
+    delete context.tagMap[fileName];
+    await context.saveSettingsDebounced?.();
+  }
+  await writeLegacySourceUrl(fileName, '', host);
+}
+
+function removeHostCharacter(fileName: string, host: HostWindow) {
+  const context = getContext(host);
+  removeCharacterFromArray(context?.characters, fileName);
+  removeCharacterFromArray(host.characters, fileName);
+}
+
+function removeCharacterFromArray(characters: TavernCharacter[] | undefined, fileName: string) {
+  if (!Array.isArray(characters)) return;
+  const index = characters.findIndex(character => getCharacterFileName(character) === fileName);
+  if (index >= 0) characters.splice(index, 1);
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => {
     window.setTimeout(resolve, ms);
@@ -670,7 +1219,8 @@ function normalizeSummaryWithMeta(
   const data = raw.data || {};
   const firstMes = stringValue(raw.firstMes || data.first_mes);
   const altGreetings = arrayValue(raw.altGreetings || data.alternate_greetings);
-  const characterBook = getBookName(data.character_book || raw.character_book);
+  const rawBook = data.character_book || raw.character_book;
+  const characterBook = getBookName(rawBook);
   const avatarFallbackUrls = buildAvatarUrls(fileName, host);
   const summary: CharacterSummary = {
     fileName,
@@ -685,6 +1235,7 @@ function normalizeSummaryWithMeta(
     creator: stringValue(raw.creator || data.creator),
     character_version: stringValue(raw.character_version || data.character_version),
     character_book: characterBook,
+    worldBookEmbedded: isEmbeddedBookValue(rawBook),
     sourceUrl: getSourceUrl(data, raw, legacyMeta),
     firstMes,
     altGreetingCount: altGreetings.length,
@@ -1032,6 +1583,16 @@ function getBookName(book: unknown): string {
     return stringValue((book as { name?: string }).name);
   }
   return '';
+}
+
+function isEmbeddedBookValue(book: unknown): boolean {
+  if (!book || typeof book !== 'object') return false;
+  const record = book as Record<string, unknown>;
+  return Array.isArray(record.entries) || Array.isArray(record.entries_list);
+}
+
+function isEmbeddedWorldBook(character: CharacterSummary): boolean {
+  return Boolean(character.worldBookEmbedded);
 }
 
 function getSourceUrl(data: Record<string, any>, raw: TavernCharacter = {}, legacyMeta: Record<string, any> = {}): string {

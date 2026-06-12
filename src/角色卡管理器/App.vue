@@ -2,15 +2,22 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { filterCharacters, getFilterCounts, sortCharacters } from './filters';
 import {
+  applyCharacterDeletion,
   applyCharacterImport,
   applyCharacterRename,
   applyFavoriteMutation,
   applySourceUrlMutation,
   applyTagMutation,
+  deleteCharacterChat,
+  downloadCharacterChats,
   downloadCharacterFile,
   exportCharactersZip,
   loadCharacterOriginalImage,
+  openCharacterChat,
+  previewCharacterDeletion,
   previewCharacterRename,
+  readCharacterChats,
+  readCharacterChatContent,
   readCharacterDetail,
   readCharacterList,
 } from './host';
@@ -18,7 +25,10 @@ import { buildImportCandidate, canApplyImport, expandImportSources, fetchImportS
 import { getTagCounts, previewTagMutation } from './tags';
 import type {
   CharacterDetail,
+  CharacterDeletePreview,
   CharacterFilter,
+  CharacterChatSummary,
+  CharacterChatContent,
   CharacterImportCandidate,
   CharacterImportDiffGroup,
   CharacterImportDiffRow,
@@ -41,6 +51,7 @@ interface ImportDiffLine {
 
 const DETAIL_LOADING_DELAY_MS = 180;
 const TAG_FILTER_MODE_KEY = 'character-card-manager:tag-filter-mode';
+const CHAT_ALIAS_KEY = 'character-card-manager:chat-aliases';
 
 const sideFilters: { id: CharacterFilter; label: string }[] = [
   { id: 'all', label: '全部' },
@@ -79,13 +90,24 @@ const applyingFavoriteFiles = ref<Set<string>>(new Set());
 const applyingBatchFavorite = ref(false);
 const exportingFiles = ref(false);
 const managementStatus = ref('');
+const deletePreview = ref<CharacterDeletePreview | null>(null);
+const deleteBackupCharacters = ref(true);
+const deleteChats = ref(false);
+const deleteWorldBooks = ref(true);
+const deleteConfirmText = ref('');
+const applyingDeletion = ref(false);
 const tagDialogOpen = ref(false);
 const detailTagName = ref('');
 const applyingDetailTag = ref(false);
+const chatStates = ref<Record<string, { loading: boolean; error: string; chats: CharacterChatSummary[] }>>({});
+const chatsExpanded = ref(false);
+const chatAliases = ref<Record<string, string>>(readStoredChatAliases());
+const expandedChatKey = ref('');
+const chatContentStates = ref<Record<string, { loading: boolean; error: string; content: CharacterChatContent | null }>>({});
+const deletingChatKeys = ref<Set<string>>(new Set());
 const sourceUrlDraft = ref('');
 const sourceUrlError = ref('');
 const savingSourceUrl = ref(false);
-const renameOpen = ref(false);
 const renameInput = ref('');
 const applyingRename = ref(false);
 const avatarUrlIndex = ref<Record<string, number>>({});
@@ -167,17 +189,43 @@ const importReadyCount = computed(() => importCandidates.value.filter(candidate 
 const importErrorCount = computed(() => importCandidates.value.filter(candidate => candidate.status === 'error').length);
 const canConfirmImports = computed(() => canApplyImport(importCandidates.value) && !parsingImports.value && !applyingImports.value);
 const renamePreview = computed<CharacterRenamePreview | null>(() => {
-  if (!activePreview.value || !renameOpen.value) return null;
+  if (!activePreview.value) return null;
   return previewCharacterRename(activePreview.value, renameInput.value, characters.value);
 });
-const canConfirmRename = computed(() => Boolean(renamePreview.value && renamePreview.value.errors.length === 0 && !applyingRename.value));
+const canSaveRename = computed(() =>
+  Boolean(activePreview.value && renameInput.value.trim() && renameInput.value.trim() !== activePreview.value.name && !applyingRename.value),
+);
 const canOpenSourceUrl = computed(() => /^https?:\/\//i.test(sourceUrlDraft.value.trim()));
+const activeChatState = computed(() =>
+  activePreview.value
+    ? chatStates.value[activePreview.value.fileName] || { loading: false, error: '', chats: [] }
+    : { loading: false, error: '', chats: [] },
+);
+const canConfirmDeletion = computed(
+  () =>
+    Boolean(deletePreview.value) &&
+    !applyingDeletion.value &&
+    deletePreview.value!.errors.length === 0 &&
+    (!deletePreview.value!.requiresDeleteText || deleteConfirmText.value === 'DELETE'),
+);
 
 watch(
   () => activePreview.value?.fileName,
   () => {
     sourceUrlDraft.value = activePreview.value?.sourceUrl || '';
     sourceUrlError.value = '';
+    chatsExpanded.value = false;
+    expandedChatKey.value = '';
+  },
+  { immediate: true },
+);
+
+watch(
+  () => `${activePreview.value?.fileName || ''}\n${activePreview.value?.name || ''}`,
+  () => {
+    if (!applyingRename.value) {
+      renameInput.value = activePreview.value?.name || '';
+    }
   },
   { immediate: true },
 );
@@ -317,6 +365,24 @@ function readStoredTagFilterMode(): TagFilterMode {
   }
 }
 
+function readStoredChatAliases(): Record<string, string> {
+  try {
+    const stored = localStorage.getItem(CHAT_ALIAS_KEY);
+    const parsed = stored ? JSON.parse(stored) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveChatAliases() {
+  try {
+    localStorage.setItem(CHAT_ALIAS_KEY, JSON.stringify(chatAliases.value));
+  } catch {
+    // 聊天别名只是界面辅助，localStorage 不可用时保持当前内存态。
+  }
+}
+
 function formatDate(timestamp: number): string {
   if (!timestamp) return '未知';
   const date = new Date(timestamp);
@@ -371,6 +437,7 @@ function changeGreeting(delta: number) {
 function toggleSelectionMode() {
   selectionMode.value = !selectionMode.value;
   clearTagPreview();
+  clearDeletePreview();
   resetRenameEditor();
   if (!selectionMode.value) {
     selectedFiles.value = new Set();
@@ -386,16 +453,19 @@ function toggleCharacterSelection(fileName: string) {
   }
   selectedFiles.value = next;
   clearTagPreview();
+  clearDeletePreview();
 }
 
 function selectVisibleCharacters() {
   selectedFiles.value = new Set([...selectedFiles.value, ...visibleCharacters.value.map(character => character.fileName)]);
   clearTagPreview();
+  clearDeletePreview();
 }
 
 function clearSelection() {
   selectedFiles.value = new Set();
   clearTagPreview();
+  clearDeletePreview();
 }
 
 function buildTagDraft() {
@@ -415,6 +485,11 @@ function previewTagChanges() {
 function clearTagPreview() {
   tagPreview.value = null;
   tagStatus.value = '';
+}
+
+function clearDeletePreview() {
+  deletePreview.value = null;
+  deleteConfirmText.value = '';
 }
 
 function openTagDialog() {
@@ -627,32 +702,266 @@ async function exportSelectedZip() {
   }
 }
 
-function openRenameEditor() {
-  if (!activePreview.value) return;
-  closeTagDialog();
-  renameOpen.value = true;
-  renameInput.value = activePreview.value.name;
+async function previewSelectedDeletion() {
+  if (selectedFileList.value.length === 0 || applyingDeletion.value) return;
   managementStatus.value = '';
+  deleteConfirmText.value = '';
+  deletePreview.value = await previewCharacterDeletion(
+    selectedFileList.value,
+    {
+      backupCharacters: deleteBackupCharacters.value,
+      deleteChats: deleteChats.value,
+      deleteWorldBooks: deleteWorldBooks.value,
+    },
+    characters.value,
+  );
+}
+
+async function previewActiveDeletion() {
+  if (!activePreview.value || applyingDeletion.value) return;
+  selectionMode.value = true;
+  selectedFiles.value = new Set([activePreview.value.fileName]);
+  clearTagPreview();
+  await previewSelectedDeletion();
+}
+
+async function confirmDeletion() {
+  if (!deletePreview.value || !canConfirmDeletion.value) return;
+  applyingDeletion.value = true;
+  managementStatus.value = '';
+  try {
+    const results = await applyCharacterDeletion(deletePreview.value);
+    const successCount = results.filter(result => result.success).length;
+    const failedCount = results.length - successCount;
+    managementStatus.value = failedCount
+      ? `删除完成：成功 ${successCount} 项，失败 ${failedCount} 项。`
+      : `删除完成：成功 ${successCount} 项。`;
+    selectedFiles.value = new Set([...selectedFiles.value].filter(fileName => !results.some(result => result.fileName === fileName && result.success)));
+    deletePreview.value = null;
+    deleteConfirmText.value = '';
+    await refreshList();
+  } finally {
+    applyingDeletion.value = false;
+  }
+}
+
+async function toggleChats() {
+  if (!activePreview.value) return;
+  chatsExpanded.value = !chatsExpanded.value;
+  if (chatsExpanded.value) {
+    await loadChats(activePreview.value.fileName);
+  }
+}
+
+async function loadChats(fileName: string) {
+  const current = chatStates.value[fileName];
+  if (current?.loading || current?.chats.length) return;
+  chatStates.value = {
+    ...chatStates.value,
+    [fileName]: { loading: true, error: '', chats: current?.chats || [] },
+  };
+  try {
+    const chats = await readCharacterChats(fileName);
+    chatStates.value = {
+      ...chatStates.value,
+      [fileName]: { loading: false, error: '', chats },
+    };
+  } catch (error) {
+    chatStates.value = {
+      ...chatStates.value,
+      [fileName]: { loading: false, error: formatError(error), chats: [] },
+    };
+  }
+}
+
+async function downloadActiveChats() {
+  if (!activePreview.value) return;
+  const result = await downloadCharacterChats(activePreview.value.fileName);
+  if (!result.success) managementStatus.value = result.message;
+}
+
+function getChatAliasKey(chat: CharacterChatSummary): string {
+  return `${activePreview.value?.fileName || ''}__${chat.fileName}`;
+}
+
+function getChatDisplayTitle(chat: CharacterChatSummary): string {
+  return chatAliases.value[getChatAliasKey(chat)] || chat.title;
+}
+
+function saveChatAlias(chat: CharacterChatSummary, value: string) {
+  const key = getChatAliasKey(chat);
+  const nextTitle = value.trim();
+  if (nextTitle && nextTitle !== chat.title) {
+    chatAliases.value = { ...chatAliases.value, [key]: nextTitle };
+  } else {
+    const { [key]: _removed, ...rest } = chatAliases.value;
+    chatAliases.value = rest;
+  }
+  saveChatAliases();
+}
+
+function commitChatAlias(chat: CharacterChatSummary, event: Event) {
+  saveChatAlias(chat, (event.target as HTMLInputElement).value);
+}
+
+async function downloadChat(chat: CharacterChatSummary) {
+  if (!activePreview.value) return;
+  const result = await downloadCharacterChats(activePreview.value.fileName, [chat.id]);
+  if (!result.success) managementStatus.value = result.message;
+}
+
+async function deleteChat(chat: CharacterChatSummary) {
+  if (!activePreview.value) return;
+  const title = getChatDisplayTitle(chat);
+  if (!window.confirm(`确认删除聊天记录“${title}”？此操作不会删除角色卡。`)) return;
+  const fileName = activePreview.value.fileName;
+  const key = getChatAliasKey(chat);
+  deletingChatKeys.value = new Set([...deletingChatKeys.value, key]);
+  managementStatus.value = '';
+  try {
+    const result = await deleteCharacterChat(fileName, chat);
+    if (!result.success) {
+      managementStatus.value = result.message;
+      return;
+    }
+    const current = chatStates.value[fileName];
+    if (current) {
+      chatStates.value = {
+        ...chatStates.value,
+        [fileName]: { ...current, chats: current.chats.filter(item => item.id !== chat.id) },
+      };
+    }
+    if (expandedChatKey.value === key) expandedChatKey.value = '';
+    const { [key]: _content, ...restContentStates } = chatContentStates.value;
+    chatContentStates.value = restContentStates;
+    const { [key]: _alias, ...restAliases } = chatAliases.value;
+    chatAliases.value = restAliases;
+    saveChatAliases();
+  } finally {
+    const next = new Set(deletingChatKeys.value);
+    next.delete(key);
+    deletingChatKeys.value = next;
+  }
+}
+
+async function toggleChatContent(chat: CharacterChatSummary) {
+  if (!activePreview.value) return;
+  const key = getChatAliasKey(chat);
+  if (expandedChatKey.value === key) {
+    expandedChatKey.value = '';
+    return;
+  }
+  expandedChatKey.value = key;
+  const current = chatContentStates.value[key];
+  if (current?.loading || current?.content) return;
+  chatContentStates.value = {
+    ...chatContentStates.value,
+    [key]: { loading: true, error: '', content: null },
+  };
+  try {
+    const content = await readCharacterChatContent(activePreview.value.fileName, chat);
+    chatContentStates.value = {
+      ...chatContentStates.value,
+      [key]: { loading: false, error: '', content },
+    };
+  } catch (error) {
+    chatContentStates.value = {
+      ...chatContentStates.value,
+      [key]: { loading: false, error: formatError(error), content: null },
+    };
+  }
+}
+
+async function openChat(chat: CharacterChatSummary) {
+  if (!activePreview.value) return;
+  const result = await openCharacterChat(activePreview.value.fileName, chat.fileName);
+  if (!result.success) managementStatus.value = result.message;
+}
+
+function getChatContentPreview(chat: CharacterChatSummary): string {
+  const state = chatContentStates.value[getChatAliasKey(chat)];
+  if (state?.loading) return '正在读取聊天内容...';
+  if (state?.error) return state.error;
+  if (!state?.content) return '';
+  return formatReadableChatContent(state.content.content);
+}
+
+function formatReadableChatContent(content: unknown): string {
+  const parsed = parseMaybeJson(content);
+  const messages = extractChatMessages(parsed);
+  if (messages.length === 0) return '没有可显示的聊天正文。';
+  return truncate(messages.join('\n\n'), '', 1400);
+}
+
+function parseMaybeJson(content: unknown): unknown {
+  if (typeof content !== 'string') return content;
+  try {
+    return JSON.parse(content);
+  } catch {
+    return content;
+  }
+}
+
+function extractChatMessages(content: unknown): string[] {
+  if (Array.isArray(content)) {
+    return content.flatMap(extractChatMessages);
+  }
+  if (!content || typeof content !== 'object') {
+    return typeof content === 'string' ? [stripChatMarkup(content)] : [];
+  }
+
+  const record = content as Record<string, unknown>;
+  if (Array.isArray(record.messages)) return extractChatMessages(record.messages);
+  if (Array.isArray(record.chat)) return extractChatMessages(record.chat);
+  if (Array.isArray(record.data)) return extractChatMessages(record.data);
+
+  const message = typeof record.mes === 'string' ? record.mes : typeof record.message === 'string' ? record.message : '';
+  if (!message.trim()) return [];
+  const speaker =
+    typeof record.name === 'string' && record.name.trim()
+      ? record.name.trim()
+      : record.is_user === true
+        ? '用户'
+        : record.is_user === false
+          ? '角色'
+          : '';
+  const text = stripChatMarkup(message);
+  return [speaker ? `${speaker}：${text}` : text];
+}
+
+function stripChatMarkup(text: string): string {
+  return text
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .trim();
 }
 
 function resetRenameEditor() {
-  renameOpen.value = false;
-  renameInput.value = '';
+  renameInput.value = activePreview.value?.name || '';
   applyingRename.value = false;
 }
 
-async function confirmRename() {
-  if (!renamePreview.value || !canConfirmRename.value) return;
+async function saveInlineRename() {
+  if (!renamePreview.value || !canSaveRename.value) return;
+  if (renamePreview.value.errors.length > 0) {
+    managementStatus.value = renamePreview.value.errors.join(' ');
+    return;
+  }
   applyingRename.value = true;
   managementStatus.value = '';
   try {
     const result = await applyCharacterRename(renamePreview.value);
-    managementStatus.value = result.message;
     if (result.success && result.newFileName) {
       selectedFile.value = result.newFileName;
       selectedFiles.value = new Set([...selectedFiles.value].map(fileName => (fileName === result.oldFileName ? result.newFileName! : fileName)));
-      resetRenameEditor();
       await refreshList();
+    } else {
+      managementStatus.value = result.message;
+      resetRenameEditor();
     }
   } finally {
     applyingRename.value = false;
@@ -1166,9 +1475,6 @@ function formatError(error: unknown): string {
                 <b v-for="tag in character.tags.slice(0, 8)" :key="tag.id">{{ tag.name }}</b>
                 <b v-if="character.tags.length > 8">+{{ character.tags.length - 8 }}</b>
               </span>
-              <span class="cm-card-badges" aria-hidden="true">
-                <b v-if="character.tags.length">{{ character.tags.length }}</b>
-              </span>
               <span class="cm-card-text">
                 <strong>{{ character.name }}</strong>
               </span>
@@ -1254,7 +1560,11 @@ function formatError(error: unknown): string {
           </template>
         </template>
 
-        <template v-else-if="showSelectionSummary">
+        <template v-else>
+          <p v-if="managementStatus" class="cm-inline-status global">{{ managementStatus }}</p>
+        </template>
+
+        <template v-if="!importMode && showSelectionSummary">
           <div class="cm-selection-summary">
             <h2>{{ selectedCharacters.length }} 个已选角色</h2>
             <dl class="cm-meta-list compact">
@@ -1287,6 +1597,49 @@ function formatError(error: unknown): string {
               </button>
             </div>
           </div>
+
+          <section class="cm-danger-zone" aria-label="批量删除">
+            <h3>删除</h3>
+            <label>
+              <input v-model="deleteBackupCharacters" type="checkbox" @change="clearDeletePreview" />
+              删除前导出 ZIP 备份
+            </label>
+            <label>
+              <input v-model="deleteChats" type="checkbox" @change="clearDeletePreview" />
+              同时删除聊天记录
+            </label>
+            <label>
+              <input v-model="deleteWorldBooks" type="checkbox" @change="clearDeletePreview" />
+              删除导入的内嵌世界书
+            </label>
+            <button class="cm-danger-action" type="button" :disabled="selectedCharacters.length === 0 || applyingDeletion" @click="previewSelectedDeletion">
+              预览删除
+            </button>
+
+            <div v-if="deletePreview" class="cm-delete-preview">
+              <p v-for="error in deletePreview.errors" :key="error" class="error">{{ error }}</p>
+              <p v-for="warning in deletePreview.warnings" :key="warning" class="warning">{{ warning }}</p>
+              <article v-for="target in deletePreview.targets" :key="target.fileName">
+                <strong>{{ target.name }}</strong>
+                <span>{{ target.fileName }}</span>
+                <span>聊天：{{ target.chats.length }} 条{{ target.willDeleteChats ? '，将删除' : '' }}</span>
+                <span>
+                  世界书：{{ target.worldBook.name || '无' }}
+                  <template v-if="target.willDeleteWorldBook">，将删除</template>
+                  <template v-else-if="target.worldBook.type !== 'none'">，跳过：{{ target.worldBook.reason }}</template>
+                </span>
+                <span>标签：{{ target.tagNames.length ? target.tagNames.join('、') : '无' }}</span>
+                <p v-for="issue in target.issues" :key="issue.message" :class="issue.level">{{ issue.message }}</p>
+              </article>
+              <label v-if="deletePreview.requiresDeleteText" class="cm-field">
+                <span>输入 DELETE 确认批量删除</span>
+                <input v-model="deleteConfirmText" type="text" autocomplete="off" />
+              </label>
+              <button class="cm-danger-action strong" type="button" :disabled="!canConfirmDeletion" @click="confirmDeletion">
+                {{ applyingDeletion ? '正在删除...' : `确认删除 ${deletePreview.targets.length} 项` }}
+              </button>
+            </div>
+          </section>
 
           <section class="cm-tag-editor" aria-label="批量标签操作">
             <h3>标签操作</h3>
@@ -1338,49 +1691,27 @@ function formatError(error: unknown): string {
           </section>
         </template>
 
-        <div v-else-if="!activePreview" class="cm-empty">请选择一个角色查看详情。</div>
-        <template v-else>
+        <div v-else-if="!importMode && !activePreview" class="cm-empty">请选择一个角色查看详情。</div>
+        <template v-else-if="!importMode && activePreview">
           <div class="cm-preview-head">
             <img :src="getAvatarSrc(activePreview)" :alt="activePreview.name" @error="handleAvatarError(activePreview)" />
             <div>
-              <h2>{{ activePreview.name }}</h2>
+              <input
+                v-model="renameInput"
+                class="cm-title-input"
+                aria-label="角色名称"
+                type="text"
+                :disabled="applyingRename"
+                @blur="saveInlineRename"
+                @keydown.enter.prevent="saveInlineRename"
+                @keydown.esc.prevent="resetRenameEditor"
+              />
               <p>{{ activePreview.fav ? '已收藏' : '未收藏' }}</p>
             </div>
-            <button class="cm-secondary-action" type="button" @click="openRenameEditor">
-              重命名
+            <button class="cm-danger-action compact" type="button" :disabled="applyingDeletion" @click="previewActiveDeletion">
+              删除
             </button>
           </div>
-
-          <section v-if="renameOpen && renamePreview" class="cm-rename-editor" aria-label="重命名角色">
-            <label class="cm-field">
-              <span>新名称</span>
-              <input v-model="renameInput" type="text" />
-            </label>
-            <dl>
-              <div>
-                <dt>当前</dt>
-                <dd>{{ renamePreview.oldName }} · {{ renamePreview.oldFileName }}</dd>
-              </div>
-              <div>
-                <dt>目标</dt>
-                <dd>{{ renamePreview.sanitizedName || '无效名称' }} · {{ renamePreview.targetFileName || '无效文件名' }}</dd>
-              </div>
-              <div v-if="renamePreview.tagIdsToMove.length">
-                <dt>标签</dt>
-                <dd>将迁移 {{ renamePreview.tagIdsToMove.length }} 个标签绑定</dd>
-              </div>
-            </dl>
-            <p v-for="warning in renamePreview.warnings" :key="warning" class="warning">{{ warning }}</p>
-            <p v-for="error in renamePreview.errors" :key="error" class="error">{{ error }}</p>
-            <div class="cm-management-actions">
-              <button class="cm-primary-action" type="button" :disabled="!canConfirmRename" @click="confirmRename">
-                {{ applyingRename ? '正在重命名...' : '确认重命名' }}
-              </button>
-              <button class="cm-secondary-action" type="button" :disabled="applyingRename" @click="resetRenameEditor">
-                取消
-              </button>
-            </div>
-          </section>
 
           <dl class="cm-meta-list">
             <div>
@@ -1446,6 +1777,85 @@ function formatError(error: unknown): string {
             </div>
             <p v-if="sourceUrlError">{{ sourceUrlError }}</p>
           </div>
+
+          <section class="cm-chat-panel" aria-label="聊天记录">
+            <div class="cm-section-head">
+              <h3>聊天记录</h3>
+              <div class="cm-management-actions">
+                <button class="cm-secondary-action" type="button" @click="toggleChats">
+                  {{ chatsExpanded ? '收起' : '查看' }}
+                </button>
+                <button
+                  class="cm-secondary-action"
+                  type="button"
+                  title="下载当前角色的全部聊天记录"
+                  :disabled="activeChatState.loading || activeChatState.chats.length === 0"
+                  @click="downloadActiveChats"
+                >
+                  全部下载
+                </button>
+              </div>
+            </div>
+            <p v-if="activeChatState.loading" class="cm-inline-status">正在读取聊天记录...</p>
+            <p v-else-if="activeChatState.error" class="cm-inline-status error">{{ activeChatState.error }}</p>
+            <template v-else-if="chatsExpanded">
+              <p v-if="activeChatState.chats.length === 0" class="cm-inline-status">没有读取到聊天记录。</p>
+              <div v-else class="cm-chat-list">
+                <article v-for="chat in activeChatState.chats" :key="chat.id">
+                  <div class="cm-chat-row">
+                    <div class="cm-chat-main">
+                      <input
+                        :value="getChatDisplayTitle(chat)"
+                        type="text"
+                        :aria-label="`聊天名称 ${getChatDisplayTitle(chat)}`"
+                        title="修改这条聊天在管理器里的显示名"
+                        @change="commitChatAlias(chat, $event)"
+                        @keydown.enter.prevent="commitChatAlias(chat, $event)"
+                      />
+                      <span>{{ chat.messageCount || 0 }} 条 · {{ formatDate(chat.updatedAt) }}</span>
+                    </div>
+                    <div class="cm-chat-actions">
+                      <button type="button" :aria-label="`查看正文 ${getChatDisplayTitle(chat)}`" title="查看正文" @click="toggleChatContent(chat)">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" />
+                          <circle cx="12" cy="12" r="2.5" />
+                        </svg>
+                      </button>
+                      <button type="button" :aria-label="`下载聊天 ${getChatDisplayTitle(chat)}`" title="下载这条聊天记录" @click="downloadChat(chat)">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M12 3v12" />
+                          <path d="m7 10 5 5 5-5" />
+                          <path d="M5 20h14" />
+                        </svg>
+                      </button>
+                      <button type="button" :aria-label="`启动聊天 ${getChatDisplayTitle(chat)}`" title="启动这条聊天" @click="openChat(chat)">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M8 5v14l11-7-11-7Z" />
+                        </svg>
+                      </button>
+                      <button
+                        class="danger"
+                        type="button"
+                        :aria-label="`删除聊天 ${getChatDisplayTitle(chat)}`"
+                        title="删除这条聊天记录"
+                        :disabled="deletingChatKeys.has(getChatAliasKey(chat))"
+                        @click="deleteChat(chat)"
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M4 7h16" />
+                          <path d="M10 11v6" />
+                          <path d="M14 11v6" />
+                          <path d="M6 7l1 14h10l1-14" />
+                          <path d="M9 7V4h6v3" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <pre v-if="expandedChatKey === getChatAliasKey(chat)" class="cm-chat-content">{{ getChatContentPreview(chat) }}</pre>
+                </article>
+              </div>
+            </template>
+          </section>
 
           <div v-if="tagDialogOpen" class="cm-tag-dialog-backdrop" role="presentation" @click.self="closeTagDialog">
             <section class="cm-tag-dialog" role="dialog" aria-modal="true" aria-label="添加标签">
@@ -2615,7 +3025,7 @@ function formatError(error: unknown): string {
   position: absolute;
   top: 8px;
   left: 8px;
-  right: 34px;
+  right: 8px;
   z-index: 2;
   display: flex;
   flex-wrap: wrap;
@@ -2640,27 +3050,6 @@ function formatError(error: unknown): string {
   text-overflow: ellipsis;
   white-space: nowrap;
   backdrop-filter: blur(4px);
-}
-
-.cm-card-badges {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 3;
-  display: inline-flex;
-  gap: 4px;
-}
-
-.cm-card-badges b {
-  min-width: 18px;
-  height: 18px;
-  display: inline-grid;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--cm-badge-bg);
-  color: var(--cm-accent-text);
-  font-size: 11px;
-  line-height: 1;
 }
 
 .cm-card-actions {
@@ -2767,10 +3156,25 @@ function formatError(error: unknown): string {
   border-radius: 6px;
 }
 
-.cm-preview-head h2 {
+.cm-title-input {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--cm-text);
+  padding: 0 4px;
+  font: inherit;
   font-size: 17px;
+  font-weight: 800;
   line-height: 1.25;
-  overflow-wrap: anywhere;
+}
+
+.cm-title-input:hover,
+.cm-title-input:focus {
+  border-color: var(--cm-border);
+  background: var(--cm-control-bg);
+  outline: none;
 }
 
 .cm-preview-head p {
@@ -2835,6 +3239,8 @@ function formatError(error: unknown): string {
 }
 
 .cm-detail-tags,
+.cm-chat-panel,
+.cm-danger-zone,
 .cm-tag-editor,
 .cm-mutation-preview,
 .cm-selection-summary {
@@ -3093,6 +3499,192 @@ function formatError(error: unknown): string {
   gap: 10px;
 }
 
+.cm-danger-zone {
+  display: grid;
+  gap: 9px;
+  border-color: oklch(62% 0.18 28 / 55%);
+}
+
+.cm-danger-zone h3,
+.cm-chat-panel h3 {
+  margin: 0;
+  font-size: 12px;
+}
+
+.cm-danger-zone label {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  color: var(--cm-muted);
+  font-size: 12px;
+}
+
+.cm-danger-action {
+  min-height: 32px;
+  border: 1px solid oklch(62% 0.18 28 / 70%);
+  border-radius: 6px;
+  background: oklch(28% 0.12 28 / 58%);
+  color: var(--cm-text);
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.cm-danger-action.compact {
+  min-height: 30px;
+  padding: 0 10px;
+}
+
+.cm-danger-action.strong {
+  background: oklch(42% 0.18 28 / 78%);
+  font-weight: 800;
+}
+
+.cm-danger-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.cm-delete-preview {
+  display: grid;
+  gap: 8px;
+}
+
+.cm-delete-preview article {
+  display: grid;
+  gap: 3px;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-bg);
+  padding: 8px;
+}
+
+.cm-delete-preview article span,
+.cm-delete-preview p,
+.cm-chat-list article span {
+  color: var(--cm-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cm-delete-preview .warning {
+  color: var(--cm-warning);
+}
+
+.cm-delete-preview .error,
+.cm-inline-status.error {
+  color: var(--cm-danger);
+}
+
+.cm-chat-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.cm-chat-list {
+  display: grid;
+  gap: 6px;
+}
+
+.cm-chat-list article {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-bg);
+  padding: 7px 8px;
+}
+
+.cm-chat-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.cm-chat-main {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.cm-chat-main input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--cm-text);
+  padding: 2px 4px;
+  font: inherit;
+  font-weight: 800;
+}
+
+.cm-chat-main input:hover,
+.cm-chat-main input:focus {
+  border-color: var(--cm-border);
+  background: var(--cm-control-bg);
+  outline: none;
+}
+
+.cm-chat-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.cm-chat-actions button {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-control-bg);
+  color: var(--cm-muted);
+  cursor: pointer;
+}
+
+.cm-chat-actions button:hover,
+.cm-chat-actions button:focus-visible {
+  border-color: var(--cm-accent);
+  color: var(--cm-text);
+  background: var(--cm-panel-2);
+}
+
+.cm-chat-actions button.danger:hover,
+.cm-chat-actions button.danger:focus-visible {
+  border-color: var(--cm-danger);
+  color: var(--cm-danger);
+}
+
+.cm-chat-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.cm-chat-actions svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.1;
+}
+
+.cm-chat-content {
+  max-height: none;
+  margin: 0;
+  overflow: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-top: 1px solid var(--cm-border);
+  padding: 8px 2px 0;
+  color: var(--cm-muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .cm-tag-editor .cm-field {
   margin-bottom: 0;
 }
@@ -3147,65 +3739,6 @@ function formatError(error: unknown): string {
 .cm-selection-summary {
   display: grid;
   gap: 10px;
-}
-
-.cm-rename-editor {
-  display: grid;
-  gap: 9px;
-  border: 1px solid var(--cm-border);
-  border-radius: 6px;
-  background: var(--cm-control-bg);
-  padding: 10px;
-}
-
-.cm-rename-editor .cm-field {
-  margin-bottom: 0;
-}
-
-.cm-rename-editor dl {
-  display: grid;
-  gap: 0;
-  margin: 0;
-  border: 1px solid var(--cm-border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.cm-rename-editor dl div {
-  display: grid;
-  grid-template-columns: 52px minmax(0, 1fr);
-  gap: 8px;
-  padding: 7px 8px;
-  border-bottom: 1px solid var(--cm-border);
-}
-
-.cm-rename-editor dl div:last-child {
-  border-bottom: 0;
-}
-
-.cm-rename-editor dt {
-  color: var(--cm-weak);
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.cm-rename-editor dd {
-  margin: 0;
-  color: var(--cm-muted);
-  overflow-wrap: anywhere;
-}
-
-.cm-rename-editor p {
-  margin: 0;
-  line-height: 1.45;
-}
-
-.cm-rename-editor .warning {
-  color: var(--cm-warning);
-}
-
-.cm-rename-editor .error {
-  color: var(--cm-danger);
 }
 
 .cm-section h3 {
