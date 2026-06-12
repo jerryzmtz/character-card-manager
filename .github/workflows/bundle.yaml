@@ -45,6 +45,8 @@ jobs:
         if: github.repository != 'StageDog/tavern_helper_template'
         run: |
           rm -rf dist/角色卡示例 dist/脚本示例 dist/流式楼层界面示例 dist/前端界面示例
+      - name: Stage bundle outputs
+        run: git add -f dist
       - name: Commit changes
         uses: EndBug/add-and-commit@v9.1.3
         with:
