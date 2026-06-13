@@ -2,6 +2,7 @@ const APP_NAME = '角色卡管理器';
 const HOST_ROOT_ID = 'character-card-manager-host-root';
 const MANAGER_FRAME_TITLE = '角色卡管理器面板';
 let localCacheBustCounter = 0;
+let frameBlobUrl = '';
 
 onScriptReady(() => {
   registerScriptButton();
@@ -57,6 +58,7 @@ function closeManager() {
   if (root) {
     root.remove();
   }
+  revokeFrameBlobUrl();
 }
 
 function appendManagerPanel(root: HTMLElement, hostDocument: Document) {
@@ -74,7 +76,7 @@ function appendManagerPanel(root: HTMLElement, hostDocument: Document) {
   const frame = hostDocument.createElement('iframe');
   frame.title = MANAGER_FRAME_TITLE;
   const previewUrl = getPreviewUrl();
-  frame.src = previewUrl;
+  frame.src = getLoadingDocumentUrl();
   applyStyles(frame, {
     display: 'block',
     width: '100%',
@@ -90,12 +92,80 @@ function appendManagerPanel(root: HTMLElement, hostDocument: Document) {
 
 async function loadFrameDocument(frame: HTMLIFrameElement, previewUrl: string) {
   try {
-    const response = await fetch(previewUrl);
-    if (!response.ok) return;
-    frame.srcdoc = await response.text();
+    frame.src = createFrameBlobUrl(await requestPreviewHtml(previewUrl));
   } catch (error) {
-    console.warn(`[${APP_NAME}] 预览页内联加载失败，改用 URL 加载`, error);
+    console.warn(`[${APP_NAME}] 预览页加载失败`, error);
+    frame.src = getErrorDocumentUrl(error);
   }
+}
+
+function requestPreviewHtml(previewUrl: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('GET', previewUrl, true);
+    request.responseType = 'text';
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        resolve(request.responseText);
+        return;
+      }
+      reject(new Error(`HTTP ${request.status}`));
+    };
+    request.onerror = () => reject(new Error('网络请求失败'));
+    request.ontimeout = () => reject(new Error('网络请求超时'));
+    request.send();
+  });
+}
+
+function createFrameBlobUrl(html: string): string {
+  revokeFrameBlobUrl();
+  frameBlobUrl = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+  return frameBlobUrl;
+}
+
+function revokeFrameBlobUrl() {
+  if (!frameBlobUrl) return;
+  URL.revokeObjectURL(frameBlobUrl);
+  frameBlobUrl = '';
+}
+
+function getLoadingDocumentUrl(): string {
+  return createFrameBlobUrl(`<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"/><style>${getFrameStatusCss()}</style></head>
+<body><main>正在加载角色卡管理器...</main></body>
+</html>`);
+}
+
+function getErrorDocumentUrl(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || '未知错误');
+  return createFrameBlobUrl(`<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"/><style>${getFrameStatusCss()}</style></head>
+<body><main><strong>角色卡管理器加载失败</strong><small>${escapeHtml(message)}</small></main></body>
+</html>`);
+}
+
+function getFrameStatusCss(): string {
+  return `
+html,body{width:100%;height:100%;margin:0;background:#050b0e;color:#dbe7ef;font:16px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+body{display:grid;place-items:center}
+main{display:grid;gap:10px;text-align:center}
+strong{font-size:20px}
+small{max-width:560px;color:#9aa8b3;word-break:break-word}`;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, char => {
+    const entities: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    };
+    return entities[char] || char;
+  });
 }
 
 function registerScriptButton() {
