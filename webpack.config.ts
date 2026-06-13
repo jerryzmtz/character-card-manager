@@ -526,7 +526,7 @@ function parse_configuration(entry: Entry): (_env: any, argv: any) => webpack.Co
       }
 
       const is_character_manager = context.includes(path.join('src', '角色卡管理器'));
-      if (is_character_manager && request === 'vue') {
+      if (is_character_manager && ['fflate', 'vue'].includes(request)) {
         return callback();
       }
 
