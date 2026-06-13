@@ -842,6 +842,31 @@ describe('写入型角色管理', () => {
     expect(calls).toEqual(['select:0', 'open:莉莉丝 - 后续.jsonl']);
   });
 
+  it('启动角色但不指定聊天时只选中角色', async () => {
+    const calls: string[] = [];
+    const context = {
+      characters: [{ avatar: '莉莉丝.png', name: '莉莉丝', data: {} }],
+      selectCharacterById: vi.fn(async id => {
+        calls.push(`select:${id}`);
+      }),
+      openCharacterChat: vi.fn(async chatfile => {
+        calls.push(`open:${chatfile}`);
+      }),
+    };
+    const host = {
+      SillyTavern: { getContext: () => context },
+      setTimeout: (callback: TimerHandler) => {
+        if (typeof callback === 'function') callback();
+        return 0;
+      },
+    } as unknown as Window & typeof globalThis;
+
+    const result = await openCharacterChat('莉莉丝.png', '', host);
+
+    expect(result.success).toBe(true);
+    expect(calls).toEqual(['select:0']);
+  });
+
   it('单条删除聊天记录会调用酒馆 chatfile 删除接口', async () => {
     const host = {
       fetch: vi.fn((url: string, options?: RequestInit) => {

@@ -52,6 +52,9 @@ interface ImportDiffLine {
 const DETAIL_LOADING_DELAY_MS = 180;
 const TAG_FILTER_MODE_KEY = 'character-card-manager:tag-filter-mode';
 const CHAT_ALIAS_KEY = 'character-card-manager:chat-aliases';
+const CARD_GRID_GAP_PX = 8;
+const CARD_GRID_HORIZONTAL_PADDING_PX = 20;
+const CARD_HEIGHT_RATIO = 4 / 3;
 
 const sideFilters: { id: CharacterFilter; label: string }[] = [
   { id: 'all', label: '全部' },
@@ -90,6 +93,7 @@ const applyingFavoriteFiles = ref<Set<string>>(new Set());
 const applyingBatchFavorite = ref(false);
 const exportingFiles = ref(false);
 const managementStatus = ref('');
+const launchingFileName = ref('');
 const deletePreview = ref<CharacterDeletePreview | null>(null);
 const deleteBackupCharacters = ref(true);
 const deleteChats = ref(false);
@@ -120,6 +124,10 @@ const selectedImportId = ref('');
 const parsingImports = ref(false);
 const applyingImports = ref(false);
 const importStatus = ref('');
+const galleryElement = ref<HTMLElement | null>(null);
+const galleryContentWidth = ref(0);
+const galleryColumnGap = ref(CARD_GRID_GAP_PX);
+const galleryRenderedColumns = ref(0);
 const loadingOriginalAvatars = new Set<string>();
 const cardSizes = [
   { label: '小', columns: 8 },
@@ -129,6 +137,8 @@ const cardSizes = [
 ];
 let detailRequestId = 0;
 let detailLoadingTimer: ReturnType<typeof setTimeout> | undefined;
+let galleryResizeObserver: ResizeObserver | undefined;
+let galleryResizeFallback: (() => void) | undefined;
 
 const visibleCharacters = computed(() =>
   sortCharacters(
@@ -180,7 +190,10 @@ const greetingOptions = computed(() => [previewFirstMessage.value, ...previewAlt
 const selectedGreeting = computed(() => greetingOptions.value[selectedGreetingIndex.value] || greetingOptions.value[0]);
 const greetingPageLabel = computed(() => `${Math.min(selectedGreetingIndex.value + 1, greetingOptions.value.length)} / ${greetingOptions.value.length}`);
 const cardSize = computed(() => cardSizes[cardSizeIndex.value]);
-const cardGridStyle = computed(() => ({ '--cm-card-cols': cardSize.value.columns }));
+const cardGridStyle = computed(() => ({
+  '--cm-card-cols': String(cardSize.value.columns),
+  '--cm-card-height': `${getMeasuredCardHeight(galleryRenderedColumns.value || cardSize.value.columns)}px`,
+}));
 const selectedImportCandidate = computed(
   () => importCandidates.value.find(candidate => candidate.id === selectedImportId.value) || importCandidates.value[0] || null,
 );
@@ -239,14 +252,94 @@ watch(
   },
 );
 
+watch(
+  galleryElement,
+  element => {
+    observeGalleryElement(element);
+  },
+  { flush: 'post' },
+);
+
+watch(
+  () => cardSize.value.columns,
+  () => {
+    window.requestAnimationFrame(() => refreshGalleryMetrics());
+  },
+);
+
 onMounted(() => {
+  observeGalleryElement(galleryElement.value);
   void refreshList();
 });
 
 onUnmounted(() => {
   clearDetailLoadingTimer();
+  disconnectGalleryObserver();
   revokeImportAvatarUrls();
 });
+
+function getMeasuredCardHeight(columns: number): number {
+  const safeColumns = Math.max(1, columns);
+  const width = galleryContentWidth.value || estimateGalleryWidth();
+  const gap = galleryColumnGap.value || CARD_GRID_GAP_PX;
+  const columnWidth = (width - gap * (safeColumns - 1)) / safeColumns;
+  return Math.max(120, Math.round(columnWidth * CARD_HEIGHT_RATIO));
+}
+
+function estimateGalleryWidth(): number {
+  if (typeof window === 'undefined') return 360;
+  return Math.max(320, window.innerWidth - 700 - CARD_GRID_HORIZONTAL_PADDING_PX);
+}
+
+function observeGalleryElement(element: HTMLElement | null) {
+  disconnectGalleryObserver();
+  if (!element) {
+    galleryContentWidth.value = 0;
+    galleryRenderedColumns.value = 0;
+    return;
+  }
+
+  refreshGalleryMetrics(element);
+  if (typeof ResizeObserver === 'function') {
+    galleryResizeObserver = new ResizeObserver(() => refreshGalleryMetrics(element));
+    galleryResizeObserver.observe(element);
+    return;
+  }
+
+  galleryResizeFallback = () => refreshGalleryMetrics(element);
+  window.addEventListener('resize', galleryResizeFallback);
+}
+
+function refreshGalleryMetrics(element = galleryElement.value) {
+  if (!element) return;
+  const style = window.getComputedStyle(element);
+  const paddingLeft = parsePx(style.paddingLeft);
+  const paddingRight = parsePx(style.paddingRight);
+  const columnGap = parsePx(style.columnGap || style.gap);
+  galleryColumnGap.value = columnGap || CARD_GRID_GAP_PX;
+  galleryContentWidth.value = Math.max(0, element.clientWidth - paddingLeft - paddingRight);
+  galleryRenderedColumns.value = getRenderedColumnCount(style) || cardSize.value.columns;
+}
+
+function disconnectGalleryObserver() {
+  galleryResizeObserver?.disconnect();
+  galleryResizeObserver = undefined;
+  if (galleryResizeFallback) {
+    window.removeEventListener('resize', galleryResizeFallback);
+    galleryResizeFallback = undefined;
+  }
+}
+
+function parsePx(value: string): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getRenderedColumnCount(style: CSSStyleDeclaration): number {
+  const template = style.gridTemplateColumns;
+  if (!template || template === 'none') return 0;
+  return template.split(/\s+/).filter(Boolean).length;
+}
 
 async function refreshList() {
   loadingList.value = true;
@@ -881,7 +974,27 @@ async function toggleChatContent(chat: CharacterChatSummary) {
 async function openChat(chat: CharacterChatSummary) {
   if (!activePreview.value) return;
   const result = await openCharacterChat(activePreview.value.fileName, chat.fileName);
-  if (!result.success) managementStatus.value = result.message;
+  if (result.success) {
+    requestClose();
+    return;
+  }
+  managementStatus.value = result.message;
+}
+
+async function launchCharacter(character: CharacterSummary | CharacterDetail | null = activePreview.value) {
+  if (!character || selectionMode.value || launchingFileName.value) return;
+  launchingFileName.value = character.fileName;
+  managementStatus.value = '';
+  try {
+    const result = await openCharacterChat(character.fileName);
+    if (result.success) {
+      requestClose();
+      return;
+    }
+    managementStatus.value = result.message;
+  } finally {
+    launchingFileName.value = '';
+  }
 }
 
 function getChatContentPreview(chat: CharacterChatSummary): string {
@@ -1454,7 +1567,7 @@ function formatError(error: unknown): string {
           没有匹配的角色卡，调整搜索或刷新列表。
         </div>
 
-        <div v-else class="cm-card-grid" :style="cardGridStyle" @wheel="handleGalleryWheel">
+        <div v-else ref="galleryElement" class="cm-card-grid" :style="cardGridStyle" @wheel="handleGalleryWheel">
           <article
             v-for="character in visibleCharacters"
             :key="character.fileName"
@@ -1464,6 +1577,7 @@ function formatError(error: unknown): string {
             class="cm-card"
             :class="{ active: selectedFile === character.fileName, selected: selectedFiles.has(character.fileName) }"
             @click="selectCharacter(character)"
+            @dblclick.stop="launchCharacter(character)"
             @keydown.enter="selectCharacter(character)"
             @keydown.space.prevent="selectCharacter(character)"
           >
@@ -1719,9 +1833,24 @@ function formatError(error: unknown): string {
               />
               <p>{{ activePreview.fav ? '已收藏' : '未收藏' }}</p>
             </div>
-            <button class="cm-danger-action compact" type="button" :disabled="applyingDeletion" @click="previewActiveDeletion">
-              删除
-            </button>
+            <div class="cm-preview-actions">
+              <button
+                class="cm-launch-action"
+                type="button"
+                title="启动角色，打开最近聊天"
+                aria-label="启动角色，打开最近聊天"
+                :disabled="launchingFileName === activePreview.fileName"
+                @click="launchCharacter(activePreview)"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M8 5v14l11-7-11-7Z" />
+                </svg>
+                <span>启动</span>
+              </button>
+              <button class="cm-danger-action compact" type="button" :disabled="applyingDeletion" @click="previewActiveDeletion">
+                删除
+              </button>
+            </div>
           </div>
 
           <dl class="cm-meta-list">
@@ -2783,8 +2912,16 @@ function formatError(error: unknown): string {
   display: block;
   width: 100%;
   aspect-ratio: 3 / 4;
+  height: auto;
   overflow: hidden;
   background: var(--cm-media-bg);
+}
+
+.cm-import-thumb::before {
+  content: '';
+  display: block;
+  width: 100%;
+  padding-top: 133.3333%;
 }
 
 .cm-import-thumb::after {
@@ -2802,6 +2939,8 @@ function formatError(error: unknown): string {
 }
 
 .cm-import-thumb img {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -2810,6 +2949,8 @@ function formatError(error: unknown): string {
 }
 
 .cm-import-thumb > b {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   display: grid;
@@ -2959,6 +3100,7 @@ function formatError(error: unknown): string {
   scroll-margin-top: 112px;
   display: block;
   width: 100%;
+  height: var(--cm-card-height, 320px);
   padding: 0;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -2966,6 +3108,7 @@ function formatError(error: unknown): string {
   color: var(--cm-text);
   text-align: left;
   cursor: pointer;
+  overflow: hidden;
 }
 
 .cm-card:hover,
@@ -3000,30 +3143,40 @@ function formatError(error: unknown): string {
 }
 
 .cm-thumb {
-  position: relative;
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  aspect-ratio: 3 / 4;
+  height: 100%;
   border-radius: 8px;
   overflow: hidden;
   background: var(--cm-media-bg);
+}
+
+.cm-thumb::before {
+  content: none;
 }
 
 .cm-thumb::after {
   content: '';
   position: absolute;
   inset: auto 0 0;
-  height: 48%;
+  z-index: 1;
+  height: 54%;
   pointer-events: none;
   background: linear-gradient(
     to bottom,
-    oklch(13% 0.012 248 / 0%),
-    oklch(11% 0.012 248 / 62%) 46%,
-    oklch(9% 0.012 248 / 92%) 100%
+    rgba(7, 11, 18, 0) 0%,
+    rgba(7, 11, 18, 0.18) 28%,
+    rgba(7, 11, 18, 0.68) 70%,
+    rgba(7, 11, 18, 0.9) 100%
   );
 }
 
 .cm-thumb img {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -3127,6 +3280,12 @@ function formatError(error: unknown): string {
   min-width: 0;
   padding: 54px 78px 12px 12px;
   pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(7, 11, 18, 0) 0%,
+    rgba(7, 11, 18, 0.42) 48%,
+    rgba(7, 11, 18, 0.82) 100%
+  );
 }
 
 .cm-card-text strong {
@@ -3157,7 +3316,7 @@ function formatError(error: unknown): string {
 .cm-preview-head {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr) auto;
-  align-items: center;
+  align-items: start;
   gap: 10px;
 }
 
@@ -3186,6 +3345,56 @@ function formatError(error: unknown): string {
   border-color: var(--cm-border);
   background: var(--cm-control-bg);
   outline: none;
+}
+
+.cm-preview-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+  white-space: nowrap;
+}
+
+.cm-launch-action {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--cm-accent);
+  border-radius: 8px;
+  background: var(--cm-accent-bg);
+  color: var(--cm-accent-text);
+  padding: 0 11px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.cm-launch-action:hover:not(:disabled),
+.cm-launch-action:focus-visible {
+  background: var(--cm-accent);
+  color: var(--cm-accent-contrast);
+  outline: none;
+}
+
+.cm-launch-action:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.cm-launch-action svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.cm-preview-actions .cm-danger-action.compact {
+  min-height: 34px;
+  border-radius: 8px;
+  padding: 0 12px;
+  font-weight: 800;
+  line-height: 1;
 }
 
 .cm-preview-head p {

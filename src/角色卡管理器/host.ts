@@ -606,7 +606,7 @@ export async function deleteCharacterChat(
 
 export async function openCharacterChat(
   fileName: string,
-  chatFileName: string,
+  chatFileName = '',
   host: HostWindow = getHostWindow(),
 ): Promise<CharacterExportResult> {
   try {
@@ -619,7 +619,10 @@ export async function openCharacterChat(
       await launcher.call(helper, { fileName, avatar: fileName }, chatFileName);
       return { success: true, message: '', fileName };
     }
-    await selectHostCharacter(fileName, host, context);
+    await selectHostCharacter(fileName, host, context, chatFileName ? 250 : 0);
+    if (!chatFileName) {
+      return { success: true, message: '', fileName };
+    }
     if (typeof contextOpener === 'function') {
       await contextOpener.call(context, chatFileName);
       return { success: true, message: '', fileName };
@@ -643,7 +646,7 @@ export async function openCharacterChat(
   }
 }
 
-async function selectHostCharacter(fileName: string, host: HostWindow, context: TavernContext | undefined) {
+async function selectHostCharacter(fileName: string, host: HostWindow, context: TavernContext | undefined, settleMs = 250) {
   const source = context?.characters || host.characters || [];
   const characterIndex = source.findIndex(character => getCharacterFileName(character) === fileName);
   if (characterIndex < 0) {
@@ -654,17 +657,17 @@ async function selectHostCharacter(fileName: string, host: HostWindow, context: 
   const domButton = host.document?.getElementById(`CharID${characterIndex}`);
   if (domButton instanceof HTMLElement) {
     domButton.click();
-    await waitForHost(host, 250);
+    if (settleMs > 0) await waitForHost(host, settleMs);
     return;
   }
   if (typeof context?.selectCharacterById === 'function') {
     await context.selectCharacterById(characterIndex, { switchMenu: false });
-    await waitForHost(host, 250);
+    if (settleMs > 0) await waitForHost(host, settleMs);
     return;
   }
   if (typeof host.loadCharacter === 'function') {
     await host.loadCharacter(characterIndex);
-    await waitForHost(host, 250);
+    if (settleMs > 0) await waitForHost(host, settleMs);
     return;
   }
 }

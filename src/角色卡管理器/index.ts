@@ -3,6 +3,7 @@ import App from './App.vue';
 
 const APP_NAME = '角色卡管理器';
 const HOST_ROOT_ID = 'character-card-manager-host-root';
+const HOST_STYLE_ATTR = 'data-character-card-manager-style';
 let managerApp: VueApp<Element> | undefined;
 
 onScriptReady(() => {
@@ -28,16 +29,28 @@ function onScriptReady(callback: () => void) {
 }
 
 function onReady(callback: () => void) {
+  const runOnce = once(callback);
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', callback, { once: true });
+    document.addEventListener('DOMContentLoaded', runOnce, { once: true });
+    window.setTimeout(runOnce, 0);
     return;
   }
-  callback();
+  runOnce();
+}
+
+function once(callback: () => void): () => void {
+  let called = false;
+  return () => {
+    if (called) return;
+    called = true;
+    callback();
+  };
 }
 
 function openManager() {
   const hostDocument = getHostDocument();
   closeManager();
+  syncManagerStyles(hostDocument);
 
   const root = hostDocument.createElement('div');
   root.id = HOST_ROOT_ID;
@@ -58,10 +71,12 @@ function closeManager() {
   managerApp?.unmount();
   managerApp = undefined;
 
-  const root = getHostDocument().getElementById(HOST_ROOT_ID);
+  const hostDocument = getHostDocument();
+  const root = hostDocument.getElementById(HOST_ROOT_ID);
   if (root) {
     root.remove();
   }
+  removeSyncedManagerStyles(hostDocument);
 }
 
 function mountManager(root: HTMLElement) {
@@ -74,6 +89,55 @@ function mountManager(root: HTMLElement) {
   root.appendChild(mountPoint);
   managerApp = createApp(App);
   managerApp.mount(mountPoint);
+}
+
+function syncManagerStyles(hostDocument: Document) {
+  if (document === hostDocument) return;
+
+  for (const style of findManagerStyles(document)) {
+    const id = getStyleSyncId(style);
+    if (hostDocument.head.querySelector(`style[${HOST_STYLE_ATTR}="${cssEscape(id)}"]`)) continue;
+
+    const syncedStyle = hostDocument.createElement('style');
+    syncedStyle.type = style.type || 'text/css';
+    syncedStyle.textContent = style.textContent || '';
+    syncedStyle.setAttribute(HOST_STYLE_ATTR, id);
+    copyOptionalAttribute(style, syncedStyle, 'media');
+    copyOptionalAttribute(style, syncedStyle, 'data-vue-ssr-id');
+    hostDocument.head.appendChild(syncedStyle);
+  }
+}
+
+function removeSyncedManagerStyles(hostDocument: Document) {
+  hostDocument.querySelectorAll(`style[${HOST_STYLE_ATTR}]`).forEach(style => style.remove());
+}
+
+function findManagerStyles(sourceDocument: Document): HTMLStyleElement[] {
+  return Array.from(sourceDocument.querySelectorAll<HTMLStyleElement>('style')).filter(style =>
+    isManagerStyle(style.textContent || ''),
+  );
+}
+
+function isManagerStyle(cssText: string): boolean {
+  return cssText.includes('.cm-shell') && cssText.includes('--cm-bg');
+}
+
+function getStyleSyncId(style: HTMLStyleElement): string {
+  return style.getAttribute('data-vue-ssr-id') || String(findManagerStyles(document).indexOf(style));
+}
+
+function copyOptionalAttribute(source: Element, target: Element, attribute: string) {
+  const value = source.getAttribute(attribute);
+  if (value) {
+    target.setAttribute(attribute, value);
+  }
+}
+
+function cssEscape(value: string): string {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(value);
+  }
+  return value.replace(/["\\]/g, '\\$&');
 }
 
 function registerScriptButton() {

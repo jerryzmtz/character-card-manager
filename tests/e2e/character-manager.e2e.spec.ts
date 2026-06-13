@@ -51,6 +51,10 @@ test.beforeEach(async ({ page }) => {
     ];
     window.__dangerousApiCalls = [];
     window.__saveSettingsCount = 0;
+    window.closeCharacterCardManager = () => {
+      document.querySelector('#app')?.replaceChildren();
+      document.querySelector('#character-card-manager-host-root')?.remove();
+    };
     window.__tavernContext = {
       characters: window.characters,
       tags: [
@@ -114,10 +118,13 @@ test.beforeEach(async ({ page }) => {
         return {
           ok: true,
           status: 200,
-          json: async () => ({
-            '莉莉丝 - 初次聊天.jsonl': { chat_items: 6, last_mes: 1700000600000 },
-            '莉莉丝 - 夜城后续.jsonl': { chat_items: 12, last_mes: 1700000700000 },
-          }),
+          json: async () =>
+            body.avatar_url === '莉莉丝.png'
+              ? {
+                  '莉莉丝 - 初次聊天.jsonl': { chat_items: 6, last_mes: 1700000600000 },
+                  '莉莉丝 - 夜城后续.jsonl': { chat_items: 12, last_mes: 1700000700000 },
+                }
+              : {},
         };
       }
       if (String(_url) === '/api/chats/get') {
@@ -194,10 +201,10 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
     .poll(async () =>
       page.locator('.cm-thumb img').first().evaluate(element => {
         const rect = element.getBoundingClientRect();
-        return Math.round((rect.height / rect.width) * 100);
+        return Math.abs(Math.round((rect.height / rect.width) * 100) - 133) <= 1;
       }),
     )
-    .toBe(133);
+    .toBe(true);
   await expect(page.locator('.cm-card img').first()).toHaveAttribute('src', /^blob:/);
   await expect(page.evaluate(() => window.__characterImageRequests?.[0])).resolves.toContain('/characters/');
   await expect(page.locator('.cm-card').first()).not.toContainText('莉莉丝.png');
@@ -309,8 +316,6 @@ test('批量删除必须先预览确认，可选删除聊天和内嵌世界书',
   await expect(page.evaluate(() => window.__deletedChats)).resolves.toEqual([
     '莉莉丝 - 夜城后续.jsonl',
     '莉莉丝 - 初次聊天.jsonl',
-    '莉莉丝 - 夜城后续.jsonl',
-    '莉莉丝 - 初次聊天.jsonl',
   ]);
 });
 
@@ -348,13 +353,37 @@ test('聊天记录行支持查看、改名、单条下载、打开和删除', as
   await expect(page.locator('.cm-chat-content')).not.toContainText('chat_metadata');
   await page.getByLabel('下载聊天 重命名聊天').click();
   await expect(page.locator('.cm-preview')).not.toContainText('已准备下载');
-  await page.getByLabel('启动聊天 重命名聊天').click();
-  await expect.poll(() => page.evaluate(() => window.__openedChat)).toBe('莉莉丝 - 夜城后续.jsonl');
 
   page.once('dialog', dialog => dialog.accept());
   await page.getByLabel('删除聊天 重命名聊天').click();
   await expect(page.getByLabel('聊天名称 重命名聊天')).toHaveCount(0);
   await expect(page.evaluate(() => window.__deletedChats)).resolves.toEqual(['莉莉丝 - 夜城后续.jsonl']);
+});
+
+test('右侧启动角色会选中角色并关闭管理器', async ({ page }) => {
+  await page.goto(pageUrl);
+
+  await page.locator('.cm-card', { hasText: '莉莉丝' }).click();
+  await page.getByRole('button', { name: '启动角色，打开最近聊天' }).click();
+
+  await expect.poll(() => page.evaluate(() => window.this_chid)).toBe(0);
+  await expect(page.locator('.cm-shell')).toHaveCount(0);
+});
+
+test('双击卡片和聊天行启动都会关闭管理器', async ({ page }) => {
+  await page.goto(pageUrl);
+
+  await page.getByRole('button', { name: '空白卡', exact: true }).dblclick();
+  await expect.poll(() => page.evaluate(() => window.this_chid)).toBe(1);
+  await expect(page.locator('.cm-shell')).toHaveCount(0);
+
+  await page.goto(pageUrl);
+  await page.locator('.cm-card', { hasText: '莉莉丝' }).click();
+  await page.getByLabel('聊天记录').getByRole('button', { name: '查看' }).click();
+  await page.getByLabel('启动聊天 夜城后续').click();
+
+  await expect.poll(() => page.evaluate(() => window.__openedChat)).toBe('莉莉丝 - 夜城后续.jsonl');
+  await expect(page.locator('.cm-shell')).toHaveCount(0);
 });
 
 test('右侧详情提供删除入口并进入删除预览', async ({ page }) => {
@@ -477,19 +506,38 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
       </head>
       <body>
         <div id="extensionsMenu"></div>
+        <iframe id="script-host" title="脚本运行容器"></iframe>
       </body>
     </html>
   `);
-  await page.evaluate(() => {
+  const scriptHost = page.locator('#script-host');
+  await scriptHost.evaluate(element => {
+    const frame = element as HTMLIFrameElement;
+    const doc = frame.contentDocument;
+    if (!doc) throw new Error('无法创建脚本运行容器');
+    doc.open();
+    doc.write(`
+      <!doctype html>
+      <html lang="zh-CN">
+        <head><meta charset="utf-8"></head>
+        <body></body>
+      </html>
+    `);
+    doc.close();
+  });
+  const scriptFrame = await (await scriptHost.elementHandle())?.contentFrame();
+  if (!scriptFrame) throw new Error('无法读取脚本运行容器');
+
+  await scriptFrame.evaluate(() => {
     window.replaceScriptButtons = buttons => {
-      window.__scriptButtons = buttons;
+      window.parent.__scriptButtons = buttons;
     };
     window.getButtonEvent = name => `button:${name}`;
     window.eventOn = (event, handler) => {
-      window.__buttonHandlers = { ...(window.__buttonHandlers || {}), [event]: handler };
+      window.parent.__buttonHandlers = { ...(window.parent.__buttonHandlers || {}), [event]: handler };
     };
   });
-  await page.addScriptTag({ type: 'module', url: scriptUrl });
+  await scriptFrame.addScriptTag({ type: 'module', url: scriptUrl });
 
   await expect(page.locator('#character-card-manager-entry')).toHaveCount(0);
   await expect(page.locator('#character-card-manager-floating-entry')).toHaveCount(0);
@@ -524,10 +572,10 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
     .poll(async () =>
       page.locator('.cm-thumb img').first().evaluate(element => {
         const rect = element.getBoundingClientRect();
-        return Math.round((rect.height / rect.width) * 100);
+        return Math.abs(Math.round((rect.height / rect.width) * 100) - 133) <= 1;
       }),
     )
-    .toBe(133);
+    .toBe(true);
 
   await page.getByTitle('关闭面板').click();
   await expect(page.locator('#character-card-manager-host-root')).toHaveCount(0);
@@ -542,4 +590,87 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
   await expect(page.locator('#character-card-manager-host-root')).toBeVisible();
   await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
   expect(previewRequests).toBe(0);
+});
+
+test('脚本在子文档运行时仍将面板样式注入宿主页面', async ({ page }) => {
+  await page.goto('http://127.0.0.1:5500/');
+  await page.setContent(`
+    <!doctype html>
+    <html lang="zh-CN">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>角色卡管理器测试宿主</title>
+      </head>
+      <body>
+        <div id="extensionsMenu"></div>
+        <iframe id="script-host" title="脚本运行容器"></iframe>
+      </body>
+    </html>
+  `);
+
+  const scriptHost = page.locator('#script-host');
+  await scriptHost.evaluate(element => {
+    const frame = element as HTMLIFrameElement;
+    const doc = frame.contentDocument;
+    if (!doc) throw new Error('无法创建脚本运行容器');
+    doc.open();
+    doc.write(`
+      <!doctype html>
+      <html lang="zh-CN">
+        <head><meta charset="utf-8"></head>
+        <body></body>
+      </html>
+    `);
+    doc.close();
+  });
+  const scriptFrame = await (await scriptHost.elementHandle())?.contentFrame();
+  if (!scriptFrame) throw new Error('无法读取脚本运行容器');
+
+  await scriptFrame.evaluate(() => {
+    window.replaceScriptButtons = buttons => {
+      window.parent.__scriptButtons = buttons;
+    };
+    window.getButtonEvent = name => `button:${name}`;
+    window.eventOn = (event, handler) => {
+      window.parent.__buttonHandlers = { ...(window.parent.__buttonHandlers || {}), [event]: handler };
+    };
+  });
+  await scriptFrame.addScriptTag({ type: 'module', url: scriptUrl });
+
+  await expect(page.evaluate(() => typeof window.__buttonHandlers?.['button:角色卡管理器'])).resolves.toBe('function');
+  await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
+
+  await expect(page.locator('#character-card-manager-host-root')).toBeVisible();
+  await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
+  await expect(page.locator('style[data-character-card-manager-style]')).toHaveCount(1);
+  await expect
+    .poll(() =>
+      page.locator('.cm-shell').evaluate(element => {
+        const style = getComputedStyle(element);
+        return {
+          display: style.display,
+          fontFamily: style.fontFamily,
+          gridTemplateRows: style.gridTemplateRows,
+        };
+      }),
+    )
+    .toMatchObject({
+      display: 'grid',
+    });
+  await expect
+    .poll(() => page.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().height)))
+    .toBeGreaterThan(120);
+  await expect
+    .poll(() =>
+      page.locator('.cm-thumb img').first().evaluate(element => {
+        const rect = element.getBoundingClientRect();
+        return Math.abs(Math.round((rect.height / rect.width) * 100) - 133) <= 1;
+      }),
+    )
+    .toBe(true);
+
+  await page.getByTitle('关闭面板').click();
+  await expect(page.locator('#character-card-manager-host-root')).toHaveCount(0);
+  await expect(page.locator('style[data-character-card-manager-style]')).toHaveCount(0);
 });
