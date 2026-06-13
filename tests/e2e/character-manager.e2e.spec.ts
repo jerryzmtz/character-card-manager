@@ -494,15 +494,11 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
   const managerFrame = page.frameLocator('iframe[title="角色卡管理器面板"]');
   await expect
     .poll(() =>
-      page.locator('iframe[title="角色卡管理器面板"]').evaluate(element => {
-        const url = new URL((element as HTMLIFrameElement).src);
-        return {
-          path: decodeURIComponent(url.pathname),
-          hasCacheBust: /^\d+-\d+$/.test(url.searchParams.get('t') || ''),
-        };
-      }),
+      page
+        .locator('iframe[title="角色卡管理器面板"]')
+        .evaluate(element => (element as HTMLIFrameElement).src.startsWith('blob:')),
     )
-    .toEqual({ path: '/dist/角色卡管理器预览/index.html', hasCacheBust: true });
+    .toBe(true);
   await expect(page.getByTitle('关闭角色卡管理器')).toHaveCount(0);
   const viewportSize = await page.evaluate(() => ({
     height: window.innerHeight,
