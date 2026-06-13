@@ -172,6 +172,14 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test('预览页不依赖外部 fflate CDN', async ({ request }) => {
+  const response = await request.get(pageUrl);
+  expect(response.ok()).toBeTruthy();
+  const html = await response.text();
+  expect(html).not.toContain('testingcf.jsdelivr.net/npm/fflate');
+  expect(html).not.toContain('cdn.jsdelivr.net/npm/fflate');
+});
+
 test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', async ({ page }) => {
   await page.goto(pageUrl);
 
