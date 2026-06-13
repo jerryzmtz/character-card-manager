@@ -1151,6 +1151,11 @@ async function loadOriginalAvatar(character: CharacterSummary | CharacterDetail)
 }
 
 function requestClose() {
+  const closeManager = (window.parent as typeof window & { closeCharacterCardManager?: () => void })?.closeCharacterCardManager;
+  if (typeof closeManager === 'function') {
+    closeManager();
+    return;
+  }
   window.parent?.postMessage({ source: 'character-card-manager', type: 'close' }, '*');
 }
 
