@@ -457,8 +457,16 @@ test('左右栏可以收起展开，中间缩略图区域随之扩大', async ({
 });
 
 test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面板', async ({ page }) => {
+  let previewRequests = 0;
+  await page.route(
+    url => decodeURIComponent(url.href).includes('/dist/角色卡管理器预览/index.html'),
+    route => {
+      previewRequests += 1;
+      return route.abort();
+    },
+  );
   await page.goto('about:blank');
-  await page.goto(pageUrl);
+  await page.goto('http://127.0.0.1:5500/');
   await page.setContent(`
     <!doctype html>
     <html lang="zh-CN">
@@ -491,14 +499,8 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
 
   await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
   await expect(page.locator('#character-card-manager-host-root')).toBeVisible();
-  const managerFrame = page.frameLocator('iframe[title="角色卡管理器面板"]');
-  await expect
-    .poll(() =>
-      page
-        .locator('iframe[title="角色卡管理器面板"]')
-        .evaluate(element => (element as HTMLIFrameElement).src.startsWith('blob:')),
-    )
-    .toBe(true);
+  await expect(page.locator('iframe[title="角色卡管理器面板"]')).toHaveCount(0);
+  expect(previewRequests).toBe(0);
   await expect(page.getByTitle('关闭角色卡管理器')).toHaveCount(0);
   const viewportSize = await page.evaluate(() => ({
     height: window.innerHeight,
@@ -517,38 +519,27 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
       }),
     )
     .toEqual({ ...viewportSize, x: 0, y: 0 });
-  await expect
-    .poll(() =>
-      page.locator('iframe[title="角色卡管理器面板"]').evaluate(element => {
-        const rect = element.getBoundingClientRect();
-        return {
-          height: Math.round(rect.height),
-          width: Math.round(rect.width),
-        };
-      }),
-    )
-    .toEqual(viewportSize);
-  await expect(managerFrame.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
   await expect
     .poll(async () =>
-      managerFrame.locator('.cm-thumb img').first().evaluate(element => {
+      page.locator('.cm-thumb img').first().evaluate(element => {
         const rect = element.getBoundingClientRect();
         return Math.round((rect.height / rect.width) * 100);
       }),
     )
     .toBe(133);
 
-  await managerFrame.getByTitle('关闭面板').click();
+  await page.getByTitle('关闭面板').click();
   await expect(page.locator('#character-card-manager-host-root')).toHaveCount(0);
 
   await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
-  const firstSrc = await page.locator('iframe[title="角色卡管理器面板"]').getAttribute('src');
+  await expect(page.locator('#character-card-manager-host-root')).toBeVisible();
   await page.evaluate(() =>
     window.dispatchEvent(new MessageEvent('message', { data: { source: 'character-card-manager', type: 'close' } })),
   );
   await expect(page.locator('#character-card-manager-host-root')).toHaveCount(0);
   await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
-  await expect
-    .poll(async () => page.locator('iframe[title="角色卡管理器面板"]').getAttribute('src'))
-    .not.toBe(firstSrc);
+  await expect(page.locator('#character-card-manager-host-root')).toBeVisible();
+  await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
+  expect(previewRequests).toBe(0);
 });
