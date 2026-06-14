@@ -5,6 +5,8 @@ import type {
   TagMutationPreview,
 } from './types';
 
+export const ARCHIVE_TAG_NAME = '归档';
+
 export function normalizeTavernTags(rawTags: unknown): CharacterTag[] {
   if (!Array.isArray(rawTags)) return [];
 
@@ -62,11 +64,25 @@ export function getUnknownTagIds(tags: CharacterTag[], tagMap: Record<string, st
 
 export function getTagCounts(characters: CharacterSummary[]): Record<string, number> {
   return characters.reduce<Record<string, number>>((counts, character) => {
-    character.tagIds.forEach(id => {
-      counts[id] = (counts[id] || 0) + 1;
+    if (isArchivedCharacter(character)) return counts;
+    character.tags.forEach(tag => {
+      if (isArchiveTag(tag)) return;
+      counts[tag.id] = (counts[tag.id] || 0) + 1;
     });
     return counts;
   }, {});
+}
+
+export function getArchiveTag(tags: CharacterTag[]): CharacterTag | undefined {
+  return tags.find(isArchiveTag);
+}
+
+export function isArchivedCharacter(character: CharacterSummary): boolean {
+  return character.tags.some(isArchiveTag);
+}
+
+export function isArchiveTag(tag: CharacterTag): boolean {
+  return tag.name.trim().toLocaleLowerCase('zh-CN') === ARCHIVE_TAG_NAME;
 }
 
 export function previewTagMutation(

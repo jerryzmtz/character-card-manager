@@ -1,4 +1,4 @@
-export type CharacterFilter = 'all' | 'favorite' | 'worldBook' | 'missingGreeting' | 'untagged' | 'error';
+export type CharacterFilter = 'all' | 'favorite' | 'archived' | 'worldBook' | 'missingGreeting' | 'untagged' | 'error';
 
 export type CharacterSort = 'date_added' | 'date_last_chat' | 'name';
 
@@ -156,6 +156,12 @@ export interface CharacterFavoriteMutationResult {
   fav: boolean;
 }
 
+export interface CharacterCoverMutationResult {
+  success: boolean;
+  message: string;
+  fileName: string;
+}
+
 export interface CharacterRenamePreview {
   oldFileName: string;
   oldName: string;
@@ -226,6 +232,7 @@ export interface CharacterImportCandidate {
   importBlob: Blob;
   diff: CharacterImportDiffGroup[];
   resultMessage?: string;
+  replaceTargetFileName?: string;
 }
 
 export interface CharacterImportDiffGroup {

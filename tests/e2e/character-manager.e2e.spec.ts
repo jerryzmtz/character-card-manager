@@ -194,6 +194,7 @@ test('打开后显示角色列表、搜索和详情预览，中文 DOM 正常', 
   await expect(page.getByRole('button', { name: '莉莉丝', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '空白卡', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '全部 2' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '归档 0' })).toBeVisible();
   await expect(page.getByRole('button', { name: '无标签 1' })).toBeVisible();
   await expect(page.getByRole('button', { name: '待整理 1' })).toBeVisible();
   await expect(page.getByRole('button', { name: '缺开场白 1' })).toHaveCount(0);
@@ -436,6 +437,36 @@ test('标签筛选支持多选切换，并可在设置里切换或且逻辑', as
   await expect(page.getByText('1 个匹配项')).toBeVisible();
 });
 
+test('归档标签会让角色退出普通筛选，只在归档入口可见', async ({ page }) => {
+  await page.goto(pageUrl);
+
+  await page.getByRole('button', { name: '莉莉丝', exact: true }).click();
+  await page.getByRole('button', { name: '添加标签' }).click();
+  await page.getByRole('dialog', { name: '添加标签' }).getByPlaceholder('输入新标签，Enter 添加').fill('归档');
+  await page.getByRole('dialog', { name: '添加标签' }).getByRole('button', { name: '添加', exact: true }).click();
+
+  await expect(page.getByRole('button', { name: '全部 1' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '归档 1' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '待整理 0' })).toBeVisible();
+  await expect(page.getByText('1 个匹配项')).toBeVisible();
+  await expect(page.getByRole('button', { name: '莉莉丝', exact: true })).toHaveCount(0);
+
+  await page.getByLabel('关闭添加标签').click();
+  await page.getByRole('button', { name: '归档 1' }).click();
+  await expect(page.getByRole('button', { name: '莉莉丝', exact: true })).toBeVisible();
+  await page.getByPlaceholder('名称、作者、文件名、描述').fill('夜城');
+  await expect(page.getByRole('button', { name: '莉莉丝', exact: true })).toBeVisible();
+  await page.getByPlaceholder('名称、作者、文件名、描述').fill('空白');
+  await expect(page.getByText('0 个匹配项')).toBeVisible();
+  await page.getByPlaceholder('名称、作者、文件名、描述').fill('');
+
+  await page.getByRole('button', { name: '莉莉丝', exact: true }).click();
+  await page.getByLabel('从 莉莉丝 移除标签 归档').click();
+  await expect(page.getByRole('button', { name: '全部 2' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '归档 0' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '待整理 1' })).toBeVisible();
+});
+
 test('移动端宽度下保持单列可读', async ({ page }) => {
   test.skip(test.info().project.name !== 'mobile', '单列布局只在移动端项目验证');
   await page.goto(pageUrl);
@@ -547,9 +578,10 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
 
   await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
   await expect(page.locator('#character-card-manager-host-root')).toBeVisible();
-  await expect(page.locator('iframe[title="角色卡管理器面板"]')).toHaveCount(0);
+  await expect(page.locator('iframe[title="角色卡管理器面板"]')).toHaveCount(1);
   expect(previewRequests).toBe(0);
   await expect(page.getByTitle('关闭角色卡管理器')).toHaveCount(0);
+  const managerFrame = page.frameLocator('iframe[title="角色卡管理器面板"]');
   const viewportSize = await page.evaluate(() => ({
     height: window.innerHeight,
     width: window.innerWidth,
@@ -567,17 +599,25 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
       }),
     )
     .toEqual({ ...viewportSize, x: 0, y: 0 });
-  await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
+  await expect(managerFrame.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
   await expect
     .poll(async () =>
-      page.locator('.cm-thumb img').first().evaluate(element => {
+      managerFrame.locator('.cm-thumb img').first().evaluate(element => {
         const rect = element.getBoundingClientRect();
         return Math.abs(Math.round((rect.height / rect.width) * 100) - 133) <= 1;
       }),
     )
     .toBe(true);
 
-  await page.getByTitle('关闭面板').click();
+  await managerFrame.getByTitle('导入/更新').click();
+  await expect(managerFrame.getByRole('dialog', { name: '导入/更新角色卡' })).toBeVisible();
+  await expect(managerFrame.getByText('选择文件')).toBeVisible();
+  await expect(managerFrame.getByText('暂无候选项')).toBeVisible();
+  await expect(managerFrame.locator('.cm-file-button input')).toHaveAttribute('multiple', '');
+  await managerFrame.getByLabel('关闭导入弹窗').click();
+  await expect(managerFrame.getByRole('dialog', { name: '导入/更新角色卡' })).toHaveCount(0);
+
+  await managerFrame.getByTitle('关闭面板').click();
   await expect(page.locator('#character-card-manager-host-root')).toHaveCount(0);
 
   await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
@@ -588,11 +628,11 @@ test('只注册酒馆助手脚本按钮入口，并通过按钮打开隔离面�
   await expect(page.locator('#character-card-manager-host-root')).toHaveCount(0);
   await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
   await expect(page.locator('#character-card-manager-host-root')).toBeVisible();
-  await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
+  await expect(managerFrame.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
   expect(previewRequests).toBe(0);
 });
 
-test('脚本在子文档运行时仍将面板样式注入宿主页面', async ({ page }) => {
+test('脚本在子文档运行时仍将面板样式注入面板 iframe', async ({ page }) => {
   await page.goto('http://127.0.0.1:5500/');
   await page.setContent(`
     <!doctype html>
@@ -642,11 +682,13 @@ test('脚本在子文档运行时仍将面板样式注入宿主页面', async ({
   await page.evaluate(() => window.__buttonHandlers?.['button:角色卡管理器']?.());
 
   await expect(page.locator('#character-card-manager-host-root')).toBeVisible();
-  await expect(page.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
-  await expect(page.locator('style[data-character-card-manager-style]')).toHaveCount(1);
+  const managerFrame = page.frameLocator('iframe[title="角色卡管理器面板"]');
+  await expect(managerFrame.getByRole('heading', { name: '角色卡管理器' })).toBeVisible();
+  await expect(page.locator('style[data-character-card-manager-style]')).toHaveCount(0);
+  await expect(managerFrame.locator('style[data-character-card-manager-style]')).toHaveCount(1);
   await expect
     .poll(() =>
-      page.locator('.cm-shell').evaluate(element => {
+      managerFrame.locator('.cm-shell').evaluate(element => {
         const style = getComputedStyle(element);
         return {
           display: style.display,
@@ -659,18 +701,18 @@ test('脚本在子文档运行时仍将面板样式注入宿主页面', async ({
       display: 'grid',
     });
   await expect
-    .poll(() => page.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().height)))
+    .poll(() => managerFrame.locator('.cm-card').first().evaluate(element => Math.round(element.getBoundingClientRect().height)))
     .toBeGreaterThan(120);
   await expect
     .poll(() =>
-      page.locator('.cm-thumb img').first().evaluate(element => {
+      managerFrame.locator('.cm-thumb img').first().evaluate(element => {
         const rect = element.getBoundingClientRect();
         return Math.abs(Math.round((rect.height / rect.width) * 100) - 133) <= 1;
       }),
     )
     .toBe(true);
 
-  await page.getByTitle('关闭面板').click();
+  await managerFrame.getByTitle('关闭面板').click();
   await expect(page.locator('#character-card-manager-host-root')).toHaveCount(0);
   await expect(page.locator('style[data-character-card-manager-style]')).toHaveCount(0);
 });

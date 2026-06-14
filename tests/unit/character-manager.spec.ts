@@ -6,6 +6,7 @@ import { filterCharacters, getFilterCounts, sortCharacters } from '../../src/角
 import {
   applyCharacterImport,
   applyCharacterDeletion,
+  applyCharacterCoverMutation,
   applyCharacterRename,
   applyFavoriteMutation,
   applySourceUrlMutation,
@@ -32,7 +33,7 @@ import {
   fetchImportSource,
   parseImportSource,
 } from '../../src/角色卡管理器/imports';
-import { previewTagMutation } from '../../src/角色卡管理器/tags';
+import { getTagCounts, previewTagMutation } from '../../src/角色卡管理器/tags';
 import type { CharacterDetail, CharacterSummary, CharacterTag } from '../../src/角色卡管理器/types';
 
 function makeCharacter(patch: Partial<CharacterSummary> = {}): CharacterSummary {
@@ -450,6 +451,54 @@ describe('角色卡导入解析与预览', () => {
     expect(input.dispatchEvent).toHaveBeenCalledTimes(1);
     expect(results[0].success).toBe(true);
   });
+
+  it('替换角色卡时世界书迁移接口不可用会保守降级，不删除旧世界书', async () => {
+    const existingWithBook = makeCharacter({
+      fileName: '旧角色.png',
+      name: '旧角色',
+      character_book: '旧世界书',
+      worldBookEmbedded: true,
+    });
+    const existingDetailWithBook: CharacterDetail = {
+      ...existingDetail,
+      fileName: '旧角色.png',
+      name: '旧角色',
+      character_book: '旧世界书',
+      worldBookEmbedded: true,
+    };
+    const blob = new Blob(
+      [
+        JSON.stringify({
+          data: {
+            name: '新角色',
+            first_mes: '新开场',
+            character_book: { name: '新世界书', entries: [{ comment: '入口', content: '内容' }] },
+          },
+        }),
+      ],
+      { type: 'application/json' },
+    );
+    const candidate = await buildImportCandidate(
+      { sourceKind: 'file', sourceName: '新角色.png', blob, contentType: 'application/json' },
+      [existingWithBook],
+      [],
+      {},
+      vi.fn().mockResolvedValue(existingDetailWithBook),
+      existingWithBook,
+    );
+    const importRawCharacter = vi.fn().mockResolvedValue({ ok: true });
+    const deleteWorldbook = vi.fn().mockResolvedValue(true);
+    const host = {
+      TavernHelper: { importRawCharacter, deleteWorldbook },
+    } as unknown as Window & typeof globalThis;
+
+    const [result] = await applyCharacterImport([candidate], host);
+
+    expect(result.success).toBe(true);
+    expect(importRawCharacter).toHaveBeenCalledWith('旧角色.png', candidate.importBlob);
+    expect(deleteWorldbook).not.toHaveBeenCalled();
+    expect(result.message).toContain('未能自动导入，需手动处理');
+  });
 });
 
 describe('搜索、排序和筛选', () => {
@@ -482,11 +531,37 @@ describe('搜索、排序和筛选', () => {
     expect(getFilterCounts(characters)).toEqual({
       all: 3,
       favorite: 1,
+      archived: 0,
       worldBook: 1,
       missingGreeting: 1,
       untagged: 1,
       error: 1,
     });
+  });
+
+  it('归档角色只参与归档筛选和归档计数', () => {
+    const archiveTag: CharacterTag = { id: 'archive', name: '归档' };
+    const sharedTag: CharacterTag = { id: '整理', name: '待整理' };
+    const visible = makeCharacter({ name: '普通卡', fav: true, tagIds: ['整理'], tags: [sharedTag] });
+    const archived = makeCharacter({
+      fileName: '归档卡.png',
+      name: '归档卡',
+      fav: true,
+      tagIds: ['整理', 'archive'],
+      tags: [sharedTag, archiveTag],
+    });
+    const list = [visible, archived, makeCharacter({ fileName: '无标签.png', name: '无标签' })];
+
+    expect(filterCharacters(list, '', 'all').map(character => character.name)).toEqual(['普通卡', '无标签']);
+    expect(filterCharacters(list, '', 'favorite').map(character => character.name)).toEqual(['普通卡']);
+    expect(filterCharacters(list, '', 'all', ['整理']).map(character => character.name)).toEqual(['普通卡']);
+    expect(filterCharacters(list, '归档', 'archived').map(character => character.name)).toEqual(['归档卡']);
+    expect(getFilterCounts(list)).toMatchObject({ all: 2, favorite: 1, archived: 1, untagged: 1 });
+    expect(getTagCounts(list)).toEqual({ 整理: 1 });
+
+    const restored = { ...archived, tagIds: ['整理'], tags: [sharedTag] };
+    expect(filterCharacters([visible, restored], '', 'all').map(character => character.name)).toEqual(['普通卡', '归档卡']);
+    expect(getTagCounts([visible, restored])).toEqual({ 整理: 2 });
   });
 
   it('按导入时间倒序，按名称正序', () => {
@@ -714,6 +789,57 @@ describe('写入型角色管理', () => {
     click.mockRestore();
     createObjectUrl.mockRestore();
     revokeObjectUrl.mockRestore();
+  });
+
+  it('封面更新会复用原角色数据并通过原生编辑接口写入头像', async () => {
+    const host = {
+      document,
+      fetch: vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            data: {
+              name: '莉莉丝',
+              description: '旧描述',
+              first_mes: '旧开场',
+              alternate_greetings: ['备选'],
+              extensions: { source_url: 'https://example.com/card', fav: true },
+              chat: [{ mes: '不应提交' }],
+            },
+            chat: [{ mes: '也不应提交' }],
+          }),
+        } as Response)
+        .mockResolvedValueOnce({ ok: true, text: async () => '' } as Response),
+    } as unknown as Window & typeof globalThis;
+
+    const result = await applyCharacterCoverMutation(
+      '莉莉丝.png',
+      new Blob(['cover-bytes'], { type: 'image/webp' }),
+      '新封面.webp',
+      host,
+    );
+
+    expect(result.success).toBe(true);
+    expect(host.fetch).toHaveBeenNthCalledWith(
+      1,
+      '/api/characters/get',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(host.fetch).toHaveBeenNthCalledWith(
+      2,
+      '/api/characters/edit',
+      expect.objectContaining({ method: 'POST', body: expect.any(FormData) }),
+    );
+    const formData = (host.fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body as FormData;
+    expect(formData.get('avatar_url')).toBe('莉莉丝.png');
+    expect(formData.get('ch_name')).toBe('莉莉丝');
+    expect(formData.get('description')).toBe('旧描述');
+    expect(formData.get('first_mes')).toBe('旧开场');
+    expect(formData.getAll('alternate_greetings')).toEqual(['备选']);
+    expect(formData.get('fav')).toBe('true');
+    expect(String(formData.get('json_data'))).not.toContain('"chat"');
+    expect(formData.get('avatar')).toBeInstanceOf(Blob);
   });
 
   it('批量 ZIP 导出会包含成功读取的角色文件并跳过失败项', async () => {
@@ -1216,7 +1342,7 @@ describe('角色卡管理器组件', () => {
     expect(context.saveSettingsDebounced).toHaveBeenCalledTimes(5);
   });
 
-  it('导入工作区会先解析预览，确认后才写入角色卡', async () => {
+  it('导入弹窗会先解析预览，确认后才写入角色卡', async () => {
     const context = {
       characters: [{ avatar: '莉莉丝.png', name: '莉莉丝', data: { first_mes: '你好。', description: '旧描述' } }],
       tags: [{ id: '整理', name: '待整理' }],
@@ -1247,13 +1373,13 @@ describe('角色卡管理器组件', () => {
     expect(wrapper.text()).not.toContain('角色库');
 
     await wrapper.get('.cm-header-primary').trigger('click');
-    expect(wrapper.text()).not.toContain('导入/更新预览');
-    expect(wrapper.find('.cm-search-field').exists()).toBe(false);
-    expect(wrapper.find('.cm-sort-field').exists()).toBe(false);
-    expect(wrapper.find('.cm-gallery-tools').exists()).toBe(false);
+    expect(wrapper.find('.cm-import-dialog').exists()).toBe(true);
+    expect(wrapper.find('.cm-search-field').exists()).toBe(true);
+    expect(wrapper.find('.cm-sort-field').exists()).toBe(true);
+    expect(wrapper.find('.cm-gallery-tools').exists()).toBe(true);
     expect(wrapper.classes()).not.toContain('left-collapsed');
-    expect(wrapper.get('.cm-workspace').classes()).toContain('left-collapsed');
-    expect(wrapper.text()).toContain('拖入文件到此处');
+    expect(wrapper.get('.cm-workspace').classes()).not.toContain('left-collapsed');
+    expect(wrapper.text()).toContain('选择文件');
     expect(wrapper.text()).toContain('暂无候选项');
     const file = new File(
       [JSON.stringify({ data: { name: '莉莉丝', description: '新描述', first_mes: '新开场' } })],
@@ -1268,18 +1394,137 @@ describe('角色卡管理器组件', () => {
 
     await vi.waitFor(() => expect(wrapper.findAll('.cm-import-card')).toHaveLength(1));
     expect(wrapper.text()).toContain('更新');
-    expect(wrapper.text()).toContain('游玩内容');
+    expect(wrapper.text()).toContain('世界书');
     expect(wrapper.text()).toContain('待整理');
-    expect(wrapper.get('.cm-preview').text()).not.toContain('结果：无');
+    expect(wrapper.get('.cm-import-dialog').text()).not.toContain('结果：无');
     expect(host.importRawCharacter).not.toHaveBeenCalled();
 
-    await wrapper.get('.cm-import-summary .cm-primary-action').trigger('click');
+    await wrapper.get('.cm-import-dialog footer .cm-primary-action').trigger('click');
     await vi.waitFor(() => expect(host.importRawCharacter).toHaveBeenCalledTimes(1));
-    expect(wrapper.text()).toContain('成功 1 项');
-
-    await wrapper.get('.cm-header-primary').trigger('click');
+    await vi.waitFor(() => expect(wrapper.find('.cm-import-dialog').exists()).toBe(false));
     expect(wrapper.get('.cm-workspace').classes()).not.toContain('left-collapsed');
     expect(wrapper.find('.cm-search-field').exists()).toBe(true);
+  });
+
+  it('右侧替换入口会锁定当前角色文件名，并在确认前不写入', async () => {
+    const context = {
+      characters: [{ avatar: '旧角色.png', name: '旧角色', data: { first_mes: '旧开场', description: '旧描述' } }],
+      tags: [],
+      tagMap: {},
+    };
+    const host = window as Window &
+      typeof globalThis & {
+        SillyTavern?: unknown;
+        characters?: unknown[];
+        importRawCharacter?: (filename: string, content: Blob) => Promise<Response>;
+      };
+    host.SillyTavern = { getContext: () => context };
+    host.characters = context.characters;
+    host.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          name: '旧角色',
+          description: '旧描述',
+          first_mes: '旧开场',
+        },
+      }),
+    } as Response);
+    host.importRawCharacter = vi.fn().mockResolvedValue({ ok: true } as Response);
+
+    const wrapper = mount(App);
+    await vi.waitFor(() => expect(wrapper.text()).toContain('旧角色'));
+
+    await wrapper.get('button[aria-label="替换或更新当前角色卡"]').trigger('click');
+    expect(wrapper.get('.cm-import-dialog').text()).toContain('替换角色卡');
+    expect(wrapper.get('.cm-import-dialog').text()).toContain('将替换当前角色：旧角色');
+    expect(wrapper.find('.cm-import-url').exists()).toBe(false);
+
+    const file = new File(
+      [
+        JSON.stringify({
+          data: {
+            name: '新卡标题',
+            description: '新描述',
+            first_mes: '新开场',
+            character_book: { name: '新世界书', entries: [{ comment: '入口', content: '内容' }] },
+          },
+        }),
+      ],
+      '完全不同的文件名.json',
+      { type: 'application/json' },
+    );
+    Object.defineProperty(wrapper.get('.cm-file-button input').element, 'files', {
+      value: [file],
+      configurable: true,
+    });
+    await wrapper.get('.cm-file-button input').trigger('change');
+
+    await vi.waitFor(() => expect(wrapper.findAll('.cm-import-card')).toHaveLength(1));
+    expect(wrapper.get('.cm-import-dialog').text()).toContain('替换');
+    expect(wrapper.get('.cm-import-dialog').text()).toContain('旧角色.png');
+    expect(wrapper.get('.cm-import-dialog').text()).toContain('新世界书');
+    expect(host.importRawCharacter).not.toHaveBeenCalled();
+
+    await wrapper.get('.cm-import-dialog footer .cm-primary-action').trigger('click');
+    await vi.waitFor(() => expect(host.importRawCharacter).toHaveBeenCalledWith('旧角色.png', expect.any(Blob)));
+  });
+
+  it('右侧头像选择普通图片会更新封面而不是打开导入候选', async () => {
+    const context = {
+      characters: [{ avatar: '莉莉丝.png', name: '莉莉丝', data: { first_mes: '你好。', description: '旧描述' } }],
+      tags: [],
+      tagMap: {},
+    };
+    const host = window as Window &
+      typeof globalThis & {
+        SillyTavern?: unknown;
+        characters?: unknown[];
+      };
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:new-cover');
+    const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
+    host.SillyTavern = { getContext: () => context };
+    host.characters = context.characters;
+    host.fetch = vi.fn((url: string) => {
+      if (url.startsWith('/characters/')) {
+        return Promise.resolve({ ok: true, blob: async () => new Blob(['old-cover'], { type: 'image/png' }) });
+      }
+      if (url === '/api/characters/get') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            data: {
+              name: '莉莉丝',
+              description: '旧描述',
+              first_mes: '你好。',
+            },
+          }),
+        });
+      }
+      if (url === '/api/characters/edit') {
+        return Promise.resolve({ ok: true, text: async () => '' });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ data: {} }) });
+    }) as typeof fetch;
+
+    const wrapper = mount(App);
+    await vi.waitFor(() => expect(wrapper.text()).toContain('莉莉丝'));
+
+    const file = new File(['new-cover'], '新封面.webp', { type: 'image/webp' });
+    Object.defineProperty(wrapper.get('.cm-visually-hidden-file').element, 'files', {
+      value: [file],
+      configurable: true,
+    });
+    await wrapper.get('.cm-visually-hidden-file').trigger('change');
+
+    await vi.waitFor(() =>
+      expect(host.fetch).toHaveBeenCalledWith('/api/characters/edit', expect.objectContaining({ method: 'POST', body: expect.any(FormData) })),
+    );
+    expect(wrapper.find('.cm-import-dialog').exists()).toBe(false);
+    const editCall = (host.fetch as ReturnType<typeof vi.fn>).mock.calls.find(call => call[0] === '/api/characters/edit');
+    expect((editCall?.[1] as RequestInit).body).toBeInstanceOf(FormData);
+    createObjectUrl.mockRestore();
+    revokeObjectUrl.mockRestore();
   });
 
   it('URL 解析失败时队列和右侧预览都显示中文错误', async () => {
@@ -1307,10 +1552,10 @@ describe('角色卡管理器组件', () => {
     await vi.waitFor(() => expect(wrapper.findAll('.cm-import-card')).toHaveLength(1));
     expect(wrapper.text()).toContain('解析失败');
     expect(wrapper.text()).toContain('URL 读取失败：HTTP 404');
-    expect(wrapper.get('.cm-preview').text()).toContain('URL 读取失败：HTTP 404');
+    expect(wrapper.get('.cm-import-dialog').text()).toContain('URL 读取失败：HTTP 404');
   });
 
-  it('导入工作区支持 ZIP 批量生成多个候选项', async () => {
+  it('导入弹窗支持 ZIP 批量生成多个候选项', async () => {
     const context = {
       characters: [],
       tags: [],
@@ -1344,8 +1589,8 @@ describe('角色卡管理器组件', () => {
     expect(wrapper.text()).toContain('角色A');
     expect(wrapper.text()).toContain('角色B');
     expect(wrapper.text()).not.toContain('note.md');
-    expect(wrapper.get('.cm-preview').text()).toContain('新增：角色B');
-    expect(wrapper.get('.cm-preview').text()).not.toContain('结果：角色B');
+    expect(wrapper.get('.cm-import-dialog').text()).toContain('新增');
+    expect(wrapper.get('.cm-import-dialog').text()).not.toContain('结果：角色B');
   });
 
   it('默认单选标签，并支持在设置中切换或/且逻辑', async () => {

@@ -4,6 +4,20 @@ import App from './App.vue';
 const APP_NAME = '角色卡管理器';
 const HOST_ROOT_ID = 'character-card-manager-host-root';
 const HOST_STYLE_ATTR = 'data-character-card-manager-style';
+const MANAGER_FRAME_TITLE = '角色卡管理器面板';
+const MANAGER_IFRAME_SRCDOC = `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      *,*::before,*::after{box-sizing:border-box;}
+      html,body,#app{width:100%;height:100%;margin:0;padding:0;overflow:hidden;}
+      body{background:oklch(8% 0.01 248);}
+    </style>
+  </head>
+  <body><div id="app"></div></body>
+</html>`;
 let managerApp: VueApp<Element> | undefined;
 
 onScriptReady(() => {
@@ -50,7 +64,6 @@ function once(callback: () => void): () => void {
 function openManager() {
   const hostDocument = getHostDocument();
   closeManager();
-  syncManagerStyles(hostDocument);
 
   const root = hostDocument.createElement('div');
   root.id = HOST_ROOT_ID;
@@ -63,8 +76,21 @@ function openManager() {
     padding: '0',
     background: 'oklch(8% 0.01 248)',
   });
+
+  const frame = hostDocument.createElement('iframe');
+  frame.title = MANAGER_FRAME_TITLE;
+  frame.srcdoc = MANAGER_IFRAME_SRCDOC;
+  applyStyles(frame, {
+    width: '100%',
+    height: '100%',
+    border: '0',
+    display: 'block',
+    background: 'oklch(8% 0.01 248)',
+  });
+
   hostDocument.body.appendChild(root);
-  mountManager(root);
+  root.appendChild(frame);
+  mountManagerFrame(frame);
 }
 
 function closeManager() {
@@ -79,16 +105,25 @@ function closeManager() {
   removeSyncedManagerStyles(hostDocument);
 }
 
-function mountManager(root: HTMLElement) {
-  const mountPoint = getHostDocument().createElement('div');
-  applyStyles(mountPoint, {
-    width: '100vw',
-    height: '100vh',
-  });
+function mountManagerFrame(frame: HTMLIFrameElement) {
+  const mount = () => {
+    const frameDocument = frame.contentDocument;
+    const mountPoint = frameDocument?.getElementById('app');
+    if (!frameDocument || !mountPoint) {
+      window.setTimeout(mount, 0);
+      return;
+    }
 
-  root.appendChild(mountPoint);
-  managerApp = createApp(App);
-  managerApp.mount(mountPoint);
+    syncManagerStyles(frameDocument);
+    managerApp = createApp(App);
+    managerApp.mount(mountPoint);
+  };
+
+  if (frame.contentDocument?.readyState === 'complete') {
+    mount();
+  } else {
+    frame.addEventListener('load', mount, { once: true });
+  }
 }
 
 function syncManagerStyles(hostDocument: Document) {

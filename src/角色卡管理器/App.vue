@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { filterCharacters, getFilterCounts, sortCharacters } from './filters';
 import {
   applyCharacterDeletion,
+  applyCharacterCoverMutation,
   applyCharacterImport,
   applyCharacterRename,
   applyFavoriteMutation,
@@ -21,8 +22,8 @@ import {
   readCharacterDetail,
   readCharacterList,
 } from './host';
-import { buildImportCandidate, canApplyImport, expandImportSources, fetchImportSource } from './imports';
-import { getTagCounts, previewTagMutation } from './tags';
+import { buildImportCandidate, canApplyImport, expandImportSources, fetchImportSource, parseImportSource } from './imports';
+import { getArchiveTag, getTagCounts, isArchiveTag, previewTagMutation } from './tags';
 import type {
   CharacterDetail,
   CharacterDeletePreview,
@@ -30,7 +31,6 @@ import type {
   CharacterChatSummary,
   CharacterChatContent,
   CharacterImportCandidate,
-  CharacterImportDiffGroup,
   CharacterImportDiffRow,
   CharacterImportParseInput,
   CharacterImportSourceKind,
@@ -50,15 +50,19 @@ interface ImportDiffLine {
 }
 
 const DETAIL_LOADING_DELAY_MS = 180;
+const APP_VERSION = '1.05';
 const TAG_FILTER_MODE_KEY = 'character-card-manager:tag-filter-mode';
 const CHAT_ALIAS_KEY = 'character-card-manager:chat-aliases';
 const CARD_GRID_GAP_PX = 8;
 const CARD_GRID_HORIZONTAL_PADDING_PX = 20;
 const CARD_HEIGHT_RATIO = 4 / 3;
+const IMPORT_ACCEPT_DEFAULT = '.json,.png,.zip,application/json,image/png,application/zip';
+const IMPORT_ACCEPT_REPLACE = '.json,.png,application/json,image/png';
 
 const sideFilters: { id: CharacterFilter; label: string }[] = [
   { id: 'all', label: '全部' },
   { id: 'favorite', label: '收藏' },
+  { id: 'archived', label: '归档' },
   { id: 'untagged', label: '无标签' },
 ];
 
@@ -78,7 +82,6 @@ const sortBy = ref<CharacterSort>('date_added');
 const globalIssues = ref<string[]>([]);
 const leftCollapsed = ref(false);
 const rightCollapsed = ref(false);
-const leftCollapsedBeforeImport = ref(false);
 const cardSizeIndex = ref(1);
 const selectedGreetingIndex = ref(0);
 const selectionMode = ref(false);
@@ -117,13 +120,16 @@ const applyingRename = ref(false);
 const avatarUrlIndex = ref<Record<string, number>>({});
 const originalAvatarUrls = ref<Record<string, string>>({});
 const importAvatarUrls = ref<Record<string, string>>({});
-const importMode = ref(false);
+const importDialogOpen = ref(false);
+const importReplaceTarget = ref<CharacterSummary | null>(null);
 const importUrl = ref('');
 const importCandidates = ref<CharacterImportCandidate[]>([]);
 const selectedImportId = ref('');
 const parsingImports = ref(false);
 const applyingImports = ref(false);
 const importStatus = ref('');
+const coverInputElement = ref<HTMLInputElement | null>(null);
+const updatingCover = ref(false);
 const galleryElement = ref<HTMLElement | null>(null);
 const galleryContentWidth = ref(0);
 const galleryColumnGap = ref(CARD_GRID_GAP_PX);
@@ -152,6 +158,8 @@ const selectedCharacters = computed(() => characters.value.filter(character => s
 const selectedFileList = computed(() => selectedCharacters.value.map(character => character.fileName));
 const filterCounts = computed(() => getFilterCounts(characters.value));
 const tagCounts = computed(() => getTagCounts(characters.value));
+const archiveTag = computed(() => getArchiveTag(tavernTags.value));
+const ordinaryTavernTags = computed(() => tavernTags.value.filter(tag => !isArchiveTag(tag)));
 const selectedTagDistribution = computed(() =>
   selectedCharacters.value
     .flatMap(character => character.tags)
@@ -197,10 +205,16 @@ const cardGridStyle = computed(() => ({
 const selectedImportCandidate = computed(
   () => importCandidates.value.find(candidate => candidate.id === selectedImportId.value) || importCandidates.value[0] || null,
 );
-const selectedImportDiff = computed(() => filterImportDiff(selectedImportCandidate.value?.diff || []));
 const importReadyCount = computed(() => importCandidates.value.filter(candidate => candidate.status !== 'error').length);
 const importErrorCount = computed(() => importCandidates.value.filter(candidate => candidate.status === 'error').length);
 const canConfirmImports = computed(() => canApplyImport(importCandidates.value) && !parsingImports.value && !applyingImports.value);
+const isImportReplaceMode = computed(() => Boolean(importReplaceTarget.value));
+const importDialogTitle = computed(() => (importReplaceTarget.value ? '替换角色卡' : '导入/更新角色卡'));
+const importDialogHint = computed(() =>
+  importReplaceTarget.value ? `将替换当前角色：${importReplaceTarget.value.name}` : '',
+);
+const importFileAccept = computed(() => (isImportReplaceMode.value ? IMPORT_ACCEPT_REPLACE : IMPORT_ACCEPT_DEFAULT));
+const importFileHint = computed(() => (isImportReplaceMode.value ? 'JSON / PNG' : 'JSON / PNG / ZIP'));
 const renamePreview = computed<CharacterRenamePreview | null>(() => {
   if (!activePreview.value) return null;
   return previewCharacterRename(activePreview.value, renameInput.value, characters.value);
@@ -275,6 +289,7 @@ onMounted(() => {
 onUnmounted(() => {
   clearDetailLoadingTimer();
   disconnectGalleryObserver();
+  revokeOriginalAvatarUrls();
   revokeImportAvatarUrls();
 });
 
@@ -372,6 +387,10 @@ function activateFilter(filter: CharacterFilter) {
 }
 
 function activateTagFilter(tagId: string) {
+  if (archiveTag.value?.id === tagId) {
+    activateFilter('archived');
+    return;
+  }
   if (tagFilterMode.value === 'exclusive') {
     activeTagIds.value = activeTagIds.value.includes(tagId) ? [] : [tagId];
   } else {
@@ -387,20 +406,37 @@ function clearTagFilters() {
   activeFilter.value = 'all';
 }
 
-function toggleImportMode() {
-  const nextImportMode = !importMode.value;
-  importMode.value = nextImportMode;
-  if (nextImportMode) {
-    leftCollapsedBeforeImport.value = leftCollapsed.value;
-    leftCollapsed.value = true;
-    selectionMode.value = false;
-    selectedFiles.value = new Set();
-    clearTagPreview();
-    resetRenameEditor();
-    closeTagDialog();
-  } else {
-    leftCollapsed.value = leftCollapsedBeforeImport.value;
-  }
+function openImportDialog(target?: CharacterSummary | CharacterDetail) {
+  importReplaceTarget.value = target
+    ? {
+        ...target,
+        tags: [...target.tags],
+        tagIds: [...target.tagIds],
+        avatarFallbackUrls: [...target.avatarFallbackUrls],
+        issues: [...target.issues],
+      }
+    : null;
+  clearImportCandidates();
+  importUrl.value = '';
+  importDialogOpen.value = true;
+  selectionMode.value = false;
+  selectedFiles.value = new Set();
+  clearTagPreview();
+  resetRenameEditor();
+  closeTagDialog();
+}
+
+function closeImportDialog() {
+  if (parsingImports.value || applyingImports.value) return;
+  importDialogOpen.value = false;
+  importReplaceTarget.value = null;
+  clearImportCandidates();
+  importUrl.value = '';
+}
+
+function openReplaceDialog() {
+  if (!activePreview.value) return;
+  openImportDialog(activePreview.value);
 }
 
 async function selectCharacter(character: CharacterSummary) {
@@ -518,6 +554,87 @@ function handleAvatarError(character: CharacterSummary | CharacterDetail) {
   }
 }
 
+function openCoverPicker() {
+  if (!activePreview.value || updatingCover.value) return;
+  coverInputElement.value?.click();
+}
+
+async function handleCoverFileChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file || !activePreview.value) return;
+  await handleCoverFile(file, activePreview.value);
+}
+
+async function handleCoverFile(file: File, character: CharacterSummary | CharacterDetail) {
+  const source: CharacterImportParseInput = {
+    sourceKind: 'file',
+    sourceName: file.name,
+    blob: file,
+    contentType: file.type,
+  };
+
+  if (await shouldTreatCoverFileAsCharacterCard(source)) {
+    openImportDialog(character);
+    await addImportFiles([file]);
+    return;
+  }
+
+  if (!isCoverImageFile(file)) {
+    managementStatus.value = '封面只支持 PNG、JPG、WebP；角色卡请使用 JSON 或带角色数据的 PNG。';
+    return;
+  }
+
+  updatingCover.value = true;
+  managementStatus.value = '';
+  try {
+    const result = await applyCharacterCoverMutation(character.fileName, file, file.name);
+    if (!result.success) {
+      managementStatus.value = result.message;
+      return;
+    }
+    replaceOriginalAvatarUrl(character.fileName, URL.createObjectURL(file));
+    await refreshList();
+    selectedFile.value = character.fileName;
+  } finally {
+    updatingCover.value = false;
+  }
+}
+
+async function shouldTreatCoverFileAsCharacterCard(source: CharacterImportParseInput): Promise<boolean> {
+  if (/\.json$/i.test(source.sourceName) || source.contentType?.toLowerCase().includes('json')) return true;
+  if (!/\.png$/i.test(source.sourceName) && !source.contentType?.toLowerCase().includes('png')) return false;
+  try {
+    await parseImportSource(source);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isCoverImageFile(file: File): boolean {
+  return /^image\/(?:png|jpeg|webp)$/i.test(file.type) || /\.(?:png|jpe?g|webp)$/i.test(file.name);
+}
+
+function replaceOriginalAvatarUrl(fileName: string, url: string) {
+  const previousUrl = originalAvatarUrls.value[fileName];
+  if (previousUrl && previousUrl.startsWith('blob:')) {
+    URL.revokeObjectURL(previousUrl);
+  }
+  originalAvatarUrls.value = {
+    ...originalAvatarUrls.value,
+    [fileName]: url,
+  };
+}
+
+function revokeOriginalAvatarUrls() {
+  Object.values(originalAvatarUrls.value).forEach(url => {
+    if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+  });
+  originalAvatarUrls.value = {};
+}
+
 function changeCardSize(delta: number) {
   cardSizeIndex.value = Math.min(Math.max(cardSizeIndex.value + delta, 0), cardSizes.length - 1);
 }
@@ -614,8 +731,11 @@ async function removeDetailTag(tag: CharacterTag) {
       fileNames: [activePreview.value.fileName],
       tagId: tag.id,
     });
-    managementStatus.value = result.message;
-    if (result.success) await refreshList();
+    if (result.success) {
+      await refreshList();
+    } else {
+      managementStatus.value = result.message;
+    }
   } finally {
     applyingDetailTag.value = false;
   }
@@ -631,8 +751,11 @@ async function toggleDetailTag(tag: CharacterTag) {
       fileNames: [activePreview.value.fileName],
       tagId: tag.id,
     });
-    managementStatus.value = result.message;
-    if (result.success) await refreshList();
+    if (result.success) {
+      await refreshList();
+    } else {
+      managementStatus.value = result.message;
+    }
   } finally {
     applyingDetailTag.value = false;
   }
@@ -650,10 +773,11 @@ async function confirmCustomDetailTag() {
       fileNames: [activePreview.value.fileName],
       tagName: customName,
     });
-    managementStatus.value = result.message;
     if (result.success) {
       detailTagName.value = '';
       await refreshList();
+    } else {
+      managementStatus.value = result.message;
     }
   } finally {
     applyingDetailTag.value = false;
@@ -740,10 +864,10 @@ async function applyFavoriteChange(character: CharacterSummary, nextFav: boolean
   setCharacterFavorite(character.fileName, nextFav);
   try {
     const result = await applyFavoriteMutation(character.fileName, nextFav);
-    managementStatus.value = result.message;
     if (result.success) {
       if (refreshAfterSuccess) await refreshList();
     } else {
+      managementStatus.value = result.message;
       setCharacterFavorite(character.fileName, result.fav);
     }
     return result.success;
@@ -786,7 +910,7 @@ async function applyFavoriteToSelection(nextFav: boolean) {
 async function downloadCharacter(character: CharacterSummary) {
   managementStatus.value = '';
   const result = await downloadCharacterFile(character.fileName);
-  managementStatus.value = result.message;
+  if (!result.success) managementStatus.value = result.message;
 }
 
 async function exportSelectedZip() {
@@ -795,7 +919,7 @@ async function exportSelectedZip() {
   managementStatus.value = '';
   try {
     const result = await exportCharactersZip(selectedFileList.value);
-    managementStatus.value = result.message;
+    if (!result.success) managementStatus.value = result.message;
   } finally {
     exportingFiles.value = false;
   }
@@ -1094,14 +1218,11 @@ async function handleImportFiles(event: Event) {
   input.value = '';
 }
 
-async function handleImportDrop(event: DragEvent) {
-  const files = Array.from(event.dataTransfer?.files || []);
-  if (files.length > 0) {
-    await addImportFiles(files);
-  }
-}
-
 async function addImportFiles(files: File[]) {
+  if (isImportReplaceMode.value && files.length !== 1) {
+    importStatus.value = '替换当前角色时一次只能选择一个 JSON 或 PNG。';
+    return;
+  }
   parsingImports.value = true;
   importStatus.value = '';
   try {
@@ -1116,6 +1237,10 @@ async function addImportFiles(files: File[]) {
 async function addImportUrl() {
   const url = importUrl.value.trim();
   if (!url) return;
+  if (isImportReplaceMode.value && /\.(?:zip)(?:[?#].*)?$/i.test(url)) {
+    importStatus.value = '替换当前角色不支持 ZIP，请选择单个 JSON 或 PNG。';
+    return;
+  }
   parsingImports.value = true;
   importStatus.value = '';
   try {
@@ -1132,8 +1257,18 @@ async function addImportUrl() {
 async function addImportSource(source: CharacterImportParseInput) {
   try {
     const sources = await expandImportSources(source);
+    if (isImportReplaceMode.value && sources.length !== 1) {
+      throw new Error('替换当前角色不支持 ZIP 或多个候选项，请选择单个 JSON 或 PNG。');
+    }
     for (const item of sources) {
-      const candidate = await buildImportCandidate(item, characters.value, tavernTags.value, tagMap.value, readCharacterDetail);
+      const candidate = await buildImportCandidate(
+        item,
+        characters.value,
+        tavernTags.value,
+        tagMap.value,
+        readCharacterDetail,
+        importReplaceTarget.value || undefined,
+      );
       pushImportCandidate(candidate);
     }
   } catch (error) {
@@ -1158,6 +1293,7 @@ async function addFailedImportCandidate(source: CharacterImportParseInput, error
     tavernTags.value,
     tagMap.value,
     readCharacterDetail,
+    importReplaceTarget.value || undefined,
   );
   candidate.status = 'error';
   candidate.issues = [{ level: 'error', message }];
@@ -1207,6 +1343,7 @@ async function confirmImports() {
   if (!canConfirmImports.value) return;
   applyingImports.value = true;
   importStatus.value = '';
+  let shouldCloseDialog = false;
   try {
     const results = await applyCharacterImport(importCandidates.value);
     importCandidates.value = importCandidates.value.map(candidate => {
@@ -1220,12 +1357,17 @@ async function confirmImports() {
     });
     const successCount = results.filter(result => result.success).length;
     const failedCount = results.length - successCount;
-    importStatus.value = `导入完成：成功 ${successCount} 项，失败 ${failedCount} 项。`;
     if (successCount > 0) {
       await refreshList();
     }
+    if (failedCount === 0) {
+      shouldCloseDialog = true;
+    } else {
+      importStatus.value = `导入完成：成功 ${successCount} 项，失败 ${failedCount} 项。`;
+    }
   } finally {
     applyingImports.value = false;
+    if (shouldCloseDialog) closeImportDialog();
   }
 }
 
@@ -1252,10 +1394,7 @@ async function loadOriginalAvatar(character: CharacterSummary | CharacterDetail)
   loadingOriginalAvatars.add(character.fileName);
   try {
     const url = await loadCharacterOriginalImage(character.fileName);
-    originalAvatarUrls.value = {
-      ...originalAvatarUrls.value,
-      [character.fileName]: url,
-    };
+    replaceOriginalAvatarUrl(character.fileName, url);
   } catch {
     // 继续使用普通 URL 和缩略图兜底。
   } finally {
@@ -1276,6 +1415,7 @@ function formatImportAction(candidate: CharacterImportCandidate): string {
   if (candidate.status === 'error') return '解析失败';
   if (candidate.status === 'success') return '已完成';
   if (candidate.status === 'failed') return '写入失败';
+  if (candidate.replaceTargetFileName) return '替换';
   return candidate.action === 'update' ? '更新' : '新增';
 }
 
@@ -1283,17 +1423,15 @@ function formatImportIssue(candidate: CharacterImportCandidate): string {
   return candidate.resultMessage || candidate.issues.map(issue => issue.message).join(' ');
 }
 
-function filterImportDiff(groups: CharacterImportDiffGroup[]): CharacterImportDiffGroup[] {
-  return groups
-    .map(group => ({
-      ...group,
-      rows: group.rows.filter(shouldShowImportDiffRow),
-    }))
-    .filter(group => group.rows.length > 0);
-}
-
-function shouldShowImportDiffRow(row: CharacterImportDiffRow): boolean {
-  return row.changed || row.preserved || hasImportDiffValue(row.oldValue) || hasImportDiffValue(row.newValue) || hasImportDiffValue(row.finalValue);
+function getImportWorldBookSummary(candidate: CharacterImportCandidate): string {
+  const worldBookRow = candidate.diff
+    .find(group => group.id === 'gameplay')
+    ?.rows.find(row => row.label === '世界书');
+  if (!worldBookRow) return '无世界书变更';
+  const lines = getImportDiffLines(worldBookRow)
+    .map(line => `${line.label}：${line.value}`)
+    .join('；');
+  return lines || '无世界书变更';
 }
 
 function getImportDiffLines(row: CharacterImportDiffRow): ImportDiffLine[] {
@@ -1338,16 +1476,19 @@ function formatError(error: unknown): string {
   <main class="cm-shell" aria-label="角色卡管理器">
     <header class="cm-header">
       <div>
-        <h1>角色卡管理器</h1>
+        <h1>角色卡管理器 <span>v{{ APP_VERSION }}</span></h1>
       </div>
       <div class="cm-header-actions" aria-label="面板操作">
         <button
           class="cm-header-primary"
           type="button"
-          :aria-pressed="importMode"
-          @click="toggleImportMode"
+          title="导入/更新"
+          aria-label="导入/更新"
+          @click="openImportDialog()"
         >
-          {{ importMode ? '返回角色库' : '导入/更新' }}
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M12 3v10m0-10 4 4m-4-4-4 4M5 14v5h14v-5" />
+          </svg>
         </button>
         <button
           class="cm-icon-button"
@@ -1397,9 +1538,9 @@ function formatError(error: unknown): string {
             <span>{{ item.label }}</span>
             <strong>{{ filterCounts[item.id] }}</strong>
           </button>
-          <div v-if="tavernTags.length === 0" class="cm-side-empty">暂无酒馆标签</div>
+          <div v-if="ordinaryTavernTags.length === 0" class="cm-side-empty">暂无酒馆标签</div>
           <button
-            v-for="tag in tavernTags"
+            v-for="tag in ordinaryTavernTags"
             :key="tag.id"
             type="button"
             :class="{ active: activeTagIds.includes(tag.id) }"
@@ -1428,8 +1569,8 @@ function formatError(error: unknown): string {
         @click="leftCollapsed = !leftCollapsed"
       ></button>
 
-      <section class="cm-list-panel" :class="{ 'import-mode': importMode }" aria-label="角色缩略图列表">
-        <div v-if="!importMode" class="cm-list-head">
+      <section class="cm-list-panel" aria-label="角色缩略图列表">
+        <div class="cm-list-head">
           <div class="cm-list-status">
             <strong>{{ visibleCharacters.length }} 个匹配项</strong>
           </div>
@@ -1447,7 +1588,6 @@ function formatError(error: unknown): string {
           </label>
           <div class="cm-list-tools">
             <button
-              v-if="!importMode"
               class="cm-selection-toggle"
               type="button"
               :aria-pressed="selectionMode"
@@ -1482,88 +1622,7 @@ function formatError(error: unknown): string {
           </div>
         </div>
 
-        <section v-if="importMode" class="cm-import-workspace" aria-label="导入和更新预览">
-          <div class="cm-import-sourcebar">
-            <div
-              class="cm-import-drop"
-              @dragover.prevent
-              @drop.prevent="handleImportDrop"
-            >
-              <label class="cm-file-button">
-                <input type="file" accept=".json,.png,.zip,application/json,image/png,application/zip" multiple @change="handleImportFiles" />
-                选择文件
-              </label>
-              <span>拖入文件到此处</span>
-            </div>
-
-            <form class="cm-import-url" @submit.prevent="addImportUrl">
-              <label class="cm-field">
-                <span>URL</span>
-                <input v-model="importUrl" type="url" placeholder="https://example.com/characters.zip" />
-              </label>
-              <button class="cm-primary-action" type="submit" :disabled="parsingImports || !importUrl.trim()">解析</button>
-            </form>
-          </div>
-
-          <div class="cm-import-summary">
-            <strong>{{ importCandidates.length }} 个候选项</strong>
-            <span>{{ importReadyCount }} 可写入 · {{ importErrorCount }} 有错误</span>
-            <span v-if="parsingImports">正在解析...</span>
-            <span v-else-if="applyingImports">正在写入...</span>
-            <span v-if="importStatus">{{ importStatus }}</span>
-            <button type="button" :disabled="importCandidates.length === 0 || applyingImports" @click="clearImportCandidates">
-              清空
-            </button>
-            <button
-              v-if="importCandidates.length > 0"
-              class="cm-primary-action cm-import-confirm"
-              type="button"
-              :disabled="!canConfirmImports"
-              @click="confirmImports"
-            >
-              {{ applyingImports ? '正在写入...' : `确认 ${importReadyCount} 项` }}
-            </button>
-          </div>
-
-          <div v-if="importCandidates.length === 0" class="cm-empty">
-            暂无候选项
-          </div>
-          <div v-else class="cm-import-list">
-            <article
-              v-for="candidate in importCandidates"
-              :key="candidate.id"
-              role="button"
-              tabindex="0"
-              class="cm-import-card"
-              :class="{ active: selectedImportCandidate?.id === candidate.id, error: candidate.status === 'error' || candidate.status === 'failed' }"
-              @click="selectedImportId = candidate.id"
-              @keydown.enter="selectedImportId = candidate.id"
-              @keydown.space.prevent="selectedImportId = candidate.id"
-            >
-              <span class="cm-import-thumb">
-                <img
-                  v-if="getImportAvatarSrc(candidate)"
-                  :src="getImportAvatarSrc(candidate)"
-                  :alt="candidate.summary.name"
-                />
-                <b v-else>{{ candidate.format.toUpperCase() }}</b>
-                <span class="cm-import-card-tags">
-                  <b>{{ candidate.format.toUpperCase() }}</b>
-                  <b>{{ formatImportAction(candidate) }}</b>
-                </span>
-                <button type="button" title="移除此项" @click.stop="removeImportCandidate(candidate.id)">×</button>
-                <span class="cm-import-card-text">
-                  <strong>{{ candidate.summary.name }}</strong>
-                  <small>{{ candidate.sourceName }}</small>
-                  <em v-if="formatImportIssue(candidate)">{{ formatImportIssue(candidate) }}</em>
-                </span>
-              </span>
-            </article>
-          </div>
-
-        </section>
-
-        <div v-else-if="!loadingList && visibleCharacters.length === 0" class="cm-empty">
+        <div v-if="!loadingList && visibleCharacters.length === 0" class="cm-empty">
           没有匹配的角色卡，调整搜索或刷新列表。
         </div>
 
@@ -1643,53 +1702,9 @@ function formatError(error: unknown): string {
       ></button>
 
       <section class="cm-preview" aria-label="角色详情预览" :aria-hidden="rightCollapsed">
-        <template v-if="importMode">
-          <div v-if="!selectedImportCandidate" class="cm-empty">请选择或解析一个导入候选项。</div>
-          <template v-else>
-            <div class="cm-preview-head">
-              <div class="cm-import-avatar" aria-hidden="true">{{ selectedImportCandidate.format.toUpperCase() }}</div>
-              <div>
-                <h2>{{ selectedImportCandidate.summary.name }}</h2>
-                <p>{{ formatImportAction(selectedImportCandidate) }} · {{ selectedImportCandidate.format.toUpperCase() }} · {{ selectedImportCandidate.fileName }}</p>
-                <p>{{ selectedImportCandidate.sourceName }}</p>
-              </div>
-            </div>
+        <p v-if="managementStatus" class="cm-inline-status global">{{ managementStatus }}</p>
 
-            <div v-if="selectedImportCandidate.issues.length" class="cm-risk-list">
-              <p v-for="issue in selectedImportCandidate.issues" :key="issue.message" :class="issue.level">
-                {{ issue.message }}
-              </p>
-            </div>
-
-            <article
-              v-for="group in selectedImportDiff"
-              :key="group.id"
-              class="cm-section cm-diff-section"
-            >
-              <h3>{{ group.title }}</h3>
-              <dl>
-                <div v-for="row in group.rows" :key="`${group.id}-${row.label}`" :class="{ changed: row.changed, preserved: row.preserved }">
-                  <dt>{{ row.label }}</dt>
-                  <dd>
-                    <component
-                      :is="line.primary ? 'strong' : 'span'"
-                      v-for="line in getImportDiffLines(row)"
-                      :key="`${row.label}-${line.label}`"
-                    >
-                      {{ line.label }}：{{ truncate(line.value, '', line.primary ? 90 : 70) }}
-                    </component>
-                  </dd>
-                </div>
-              </dl>
-            </article>
-          </template>
-        </template>
-
-        <template v-else>
-          <p v-if="managementStatus" class="cm-inline-status global">{{ managementStatus }}</p>
-        </template>
-
-        <template v-if="!importMode && showSelectionSummary">
+        <template v-if="showSelectionSummary">
           <div class="cm-selection-summary">
             <h2>{{ selectedCharacters.length }} 个已选角色</h2>
             <dl class="cm-meta-list compact">
@@ -1816,10 +1831,27 @@ function formatError(error: unknown): string {
           </section>
         </template>
 
-        <div v-else-if="!importMode && !activePreview" class="cm-empty">请选择一个角色查看详情。</div>
-        <template v-else-if="!importMode && activePreview">
+        <div v-else-if="!activePreview" class="cm-empty">请选择一个角色查看详情。</div>
+        <template v-else-if="activePreview">
           <div class="cm-preview-head">
-            <img :src="getAvatarSrc(activePreview)" :alt="activePreview.name" @error="handleAvatarError(activePreview)" />
+            <button
+              class="cm-preview-avatar-button"
+              type="button"
+              title="更换封面图"
+              aria-label="更换封面图"
+              :disabled="updatingCover"
+              @click="openCoverPicker"
+            >
+              <img :src="getAvatarSrc(activePreview)" :alt="activePreview.name" @error="handleAvatarError(activePreview)" />
+              <span>更换</span>
+            </button>
+            <input
+              ref="coverInputElement"
+              class="cm-visually-hidden-file"
+              type="file"
+              accept=".png,.jpg,.jpeg,.webp,.json,image/png,image/jpeg,image/webp,application/json"
+              @change="handleCoverFileChange"
+            />
             <div>
               <input
                 v-model="renameInput"
@@ -1835,7 +1867,7 @@ function formatError(error: unknown): string {
             </div>
             <div class="cm-preview-actions">
               <button
-                class="cm-launch-action"
+                class="cm-preview-action-icon primary"
                 type="button"
                 title="启动角色，打开最近聊天"
                 aria-label="启动角色，打开最近聊天"
@@ -1845,10 +1877,29 @@ function formatError(error: unknown): string {
                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                   <path d="M8 5v14l11-7-11-7Z" />
                 </svg>
-                <span>启动</span>
               </button>
-              <button class="cm-danger-action compact" type="button" :disabled="applyingDeletion" @click="previewActiveDeletion">
-                删除
+              <button
+                class="cm-preview-action-icon"
+                type="button"
+                title="替换或更新当前角色卡"
+                aria-label="替换或更新当前角色卡"
+                @click="openReplaceDialog"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M20 7h-9a4 4 0 0 0-4 4v1m-3-4 3 3 3-3M4 17h9a4 4 0 0 0 4-4v-1m3 4-3-3-3 3" />
+                </svg>
+              </button>
+              <button
+                class="cm-preview-action-icon danger"
+                type="button"
+                title="删除"
+                aria-label="删除"
+                :disabled="applyingDeletion"
+                @click="previewActiveDeletion"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M4 7h16M10 11v6m4-6v6M9 7l1-3h4l1 3m-8 0 1 13h8l1-13" />
+                </svg>
               </button>
             </div>
           </div>
@@ -2090,6 +2141,131 @@ function formatError(error: unknown): string {
       </section>
     </section>
 
+    <div
+      v-if="importDialogOpen"
+      class="cm-import-dialog-backdrop"
+      role="presentation"
+      @click.self="closeImportDialog"
+    >
+      <section
+        class="cm-import-dialog"
+        :class="{ empty: importCandidates.length === 0 }"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="importDialogTitle"
+      >
+        <header>
+          <div>
+            <h2>{{ importDialogTitle }}</h2>
+            <p v-if="importDialogHint">{{ importDialogHint }}</p>
+          </div>
+          <button class="cm-icon-button danger" type="button" title="关闭" aria-label="关闭导入弹窗" :disabled="parsingImports || applyingImports" @click="closeImportDialog">
+            ×
+          </button>
+        </header>
+
+        <div class="cm-import-sourcebar">
+          <div class="cm-import-file-source">
+            <label class="cm-file-button">
+              <input
+                type="file"
+                :accept="importFileAccept"
+                :multiple="!isImportReplaceMode"
+                @change="handleImportFiles"
+              />
+              选择文件
+            </label>
+            <span>{{ importFileHint }}</span>
+          </div>
+
+          <form v-if="!isImportReplaceMode" class="cm-import-url" @submit.prevent="addImportUrl">
+            <label class="cm-field">
+              <input v-model="importUrl" type="url" placeholder="https://example.com/characters.zip" />
+            </label>
+            <button class="cm-primary-action" type="submit" :disabled="parsingImports || !importUrl.trim()">解析 URL</button>
+          </form>
+        </div>
+
+        <div class="cm-import-summary">
+          <strong>{{ importCandidates.length }} 个候选项</strong>
+          <span>{{ importReadyCount }} 可写入</span>
+          <span v-if="importErrorCount">{{ importErrorCount }} 有错误</span>
+          <span v-if="parsingImports">正在解析...</span>
+          <span v-else-if="applyingImports">正在写入...</span>
+          <span v-if="importStatus">{{ importStatus }}</span>
+          <button type="button" :disabled="importCandidates.length === 0 || applyingImports" @click="clearImportCandidates">
+            清空
+          </button>
+        </div>
+
+        <div class="cm-import-dialog-body">
+          <div v-if="importCandidates.length === 0" class="cm-import-empty">
+            <strong>暂无候选项</strong>
+          </div>
+          <div v-else class="cm-import-list">
+            <article
+              v-for="candidate in importCandidates"
+              :key="candidate.id"
+              role="button"
+              tabindex="0"
+              class="cm-import-card"
+              :class="{ active: selectedImportCandidate?.id === candidate.id, error: candidate.status === 'error' || candidate.status === 'failed' }"
+              @click="selectedImportId = candidate.id"
+              @keydown.enter="selectedImportId = candidate.id"
+              @keydown.space.prevent="selectedImportId = candidate.id"
+            >
+              <span class="cm-import-thumb">
+                <img v-if="getImportAvatarSrc(candidate)" :src="getImportAvatarSrc(candidate)" :alt="candidate.summary.name" />
+                <b v-else>{{ candidate.format.toUpperCase() }}</b>
+                <span class="cm-import-card-tags">
+                  <b>{{ candidate.format.toUpperCase() }}</b>
+                  <b>{{ formatImportAction(candidate) }}</b>
+                </span>
+                <button type="button" title="移除此项" aria-label="移除此项" @click.stop="removeImportCandidate(candidate.id)">×</button>
+                <span class="cm-import-card-text">
+                  <strong>{{ candidate.summary.name }}</strong>
+                  <small>{{ candidate.sourceName }}</small>
+                  <em v-if="formatImportIssue(candidate)">{{ formatImportIssue(candidate) }}</em>
+                </span>
+              </span>
+            </article>
+          </div>
+
+          <aside v-if="selectedImportCandidate" class="cm-import-mini-preview" aria-label="候选预览">
+            <div class="cm-import-preview-title">
+              <div class="cm-import-avatar" aria-hidden="true">{{ selectedImportCandidate.format.toUpperCase() }}</div>
+              <div>
+                <h3>{{ selectedImportCandidate.summary.name }}</h3>
+                <p>{{ formatImportAction(selectedImportCandidate) }} · {{ selectedImportCandidate.fileName }}</p>
+              </div>
+            </div>
+            <dl>
+              <div>
+                <dt>来源</dt>
+                <dd>{{ selectedImportCandidate.sourceName }}</dd>
+              </div>
+              <div>
+                <dt>世界书</dt>
+                <dd>{{ getImportWorldBookSummary(selectedImportCandidate) }}</dd>
+              </div>
+            </dl>
+            <div v-if="selectedImportCandidate.issues.length" class="cm-risk-list">
+              <p v-for="issue in selectedImportCandidate.issues" :key="issue.message" :class="issue.level">
+                {{ issue.message }}
+              </p>
+            </div>
+          </aside>
+        </div>
+
+        <footer>
+          <button class="cm-secondary-action" type="button" :disabled="parsingImports || applyingImports" @click="closeImportDialog">取消</button>
+          <button class="cm-primary-action cm-import-confirm" type="button" :disabled="!canConfirmImports" @click="confirmImports">
+            {{ applyingImports ? '正在写入...' : `确认 ${importReadyCount} 项` }}
+          </button>
+        </footer>
+      </section>
+    </div>
+
     <div v-if="settingsOpen" class="cm-settings-backdrop" role="presentation" @click="settingsOpen = false">
       <section class="cm-settings" role="dialog" aria-modal="true" aria-labelledby="cm-settings-title" @click.stop>
         <header>
@@ -2210,6 +2386,12 @@ function formatError(error: unknown): string {
   line-height: 1.25;
 }
 
+.cm-header h1 span {
+  color: var(--cm-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .cm-preview p,
 .cm-list-head > span {
   color: var(--cm-muted);
@@ -2218,6 +2400,8 @@ function formatError(error: unknown): string {
 .cm-icon-button {
   width: 34px;
   height: 34px;
+  display: inline-grid;
+  place-items: center;
   border: 1px solid var(--cm-border);
   border-radius: 6px;
   background: var(--cm-panel-2);
@@ -2226,14 +2410,16 @@ function formatError(error: unknown): string {
 }
 
 .cm-header-primary {
+  width: 36px;
   height: 34px;
+  display: inline-grid;
+  place-items: center;
   border: 1px solid var(--cm-accent);
   border-radius: 6px;
   background: var(--cm-primary-bg);
   color: var(--cm-text);
-  padding: 0 12px;
+  padding: 0;
   cursor: pointer;
-  font-weight: 700;
 }
 
 .cm-header-primary[aria-pressed='true'] {
@@ -2249,6 +2435,17 @@ function formatError(error: unknown): string {
 .cm-header-primary:focus-visible {
   outline: 1px solid var(--cm-accent);
   outline-offset: 2px;
+}
+
+.cm-header-primary svg,
+.cm-icon-button svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
 }
 
 .cm-icon-button:disabled {
@@ -2745,6 +2942,151 @@ function formatError(error: unknown): string {
   display: none;
 }
 
+.cm-import-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: var(--cm-backdrop);
+}
+
+.cm-import-dialog {
+  width: min(780px, calc(100vw - 32px));
+  max-height: min(680px, calc(100vh - 32px));
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  border: 1px solid var(--cm-border);
+  border-radius: 8px;
+  background: var(--cm-panel);
+  color: var(--cm-text);
+  overflow: hidden;
+  box-shadow: 0 18px 60px oklch(4% 0.01 248 / 50%);
+}
+
+.cm-import-dialog.empty {
+  grid-template-rows: auto auto auto minmax(180px, 1fr) auto;
+}
+
+.cm-import-dialog > header,
+.cm-import-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--cm-border);
+}
+
+.cm-import-dialog > footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--cm-border);
+  border-bottom: 0;
+}
+
+.cm-import-dialog h2,
+.cm-import-dialog h3,
+.cm-import-dialog p {
+  margin: 0;
+}
+
+.cm-import-dialog h2 {
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.cm-import-dialog header p,
+.cm-import-mini-preview > p {
+  margin-top: 3px;
+  color: var(--cm-muted);
+  font-size: 12px;
+}
+
+.cm-import-dialog-body {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  gap: 10px;
+  padding: 10px 14px;
+  overflow: hidden;
+}
+
+.cm-import-dialog.empty .cm-import-dialog-body {
+  grid-template-columns: 1fr;
+  place-items: center;
+}
+
+.cm-import-empty {
+  display: grid;
+  place-items: center;
+  gap: 5px;
+  color: var(--cm-muted);
+  text-align: center;
+}
+
+.cm-import-empty strong {
+  color: var(--cm-text);
+  font-size: 15px;
+}
+
+.cm-import-empty span {
+  font-size: 12px;
+}
+
+.cm-import-mini-preview {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  overflow: auto;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-panel-2);
+  padding: 10px;
+  scrollbar-width: none;
+}
+
+.cm-import-mini-preview::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.cm-import-mini-preview dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.cm-import-mini-preview dt {
+  color: var(--cm-weak);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.cm-import-mini-preview dd {
+  margin: 2px 0 0;
+  color: var(--cm-muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.cm-import-preview-title {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+}
+
+.cm-import-preview-title h3,
+.cm-import-preview-title p {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cm-import-summary,
 .cm-diff-section dl {
   border: 1px solid var(--cm-border);
@@ -2754,13 +3096,13 @@ function formatError(error: unknown): string {
 
 .cm-import-sourcebar {
   display: grid;
-  grid-template-columns: minmax(240px, 0.75fr) minmax(360px, 1.25fr);
+  grid-template-columns: minmax(210px, 0.65fr) minmax(280px, 1.35fr);
   gap: 10px;
   align-items: center;
   min-width: 0;
   border-bottom: 1px solid var(--cm-border);
   background: var(--cm-control-bg);
-  padding: 12px 14px;
+  padding: 10px 14px;
 }
 
 .cm-import-card em {
@@ -2769,14 +3111,14 @@ function formatError(error: unknown): string {
   line-height: 1.5;
 }
 
-.cm-import-drop {
+.cm-import-file-source {
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
 }
 
-.cm-import-drop span {
+.cm-import-file-source span {
   min-width: 0;
   overflow: hidden;
   color: var(--cm-muted);
@@ -2810,7 +3152,7 @@ function formatError(error: unknown): string {
 .cm-import-url {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
   min-width: 0;
 }
@@ -2823,11 +3165,11 @@ function formatError(error: unknown): string {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 10px;
+  gap: 8px;
   border-right: 0;
   border-left: 0;
   border-radius: 0;
-  padding: 9px 12px;
+  padding: 8px 14px;
 }
 
 .cm-import-summary span {
@@ -2852,28 +3194,28 @@ function formatError(error: unknown): string {
   cursor: pointer;
 }
 
-.cm-import-summary .cm-import-confirm {
-  min-height: 34px;
+.cm-import-dialog > footer .cm-import-confirm {
+  min-height: 36px;
   border-color: var(--cm-accent);
   background: var(--cm-accent);
   color: var(--cm-accent-contrast);
-  padding: 0 14px;
+  padding: 0 16px;
   font-weight: 800;
   box-shadow: 0 0 0 1px oklch(92% 0.05 250 / 16%);
 }
 
-.cm-import-summary .cm-import-confirm:hover:not(:disabled),
-.cm-import-summary .cm-import-confirm:focus-visible {
+.cm-import-dialog > footer .cm-import-confirm:hover:not(:disabled),
+.cm-import-dialog > footer .cm-import-confirm:focus-visible {
   filter: brightness(1.08);
 }
 
 .cm-import-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
   align-content: start;
-  gap: 8px;
+  gap: 7px;
   min-height: 0;
-  padding: 10px 12px 12px;
+  padding: 0;
   overflow: auto;
   scrollbar-width: none;
   -ms-overflow-style: none;
@@ -3263,7 +3605,7 @@ function formatError(error: unknown): string {
   stroke-width: 2.2;
 }
 
-.cm-preview-head img {
+.cm-preview-avatar-button img {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -3316,14 +3658,59 @@ function formatError(error: unknown): string {
 .cm-preview-head {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr) auto;
-  align-items: start;
+  align-items: center;
   gap: 10px;
 }
 
-.cm-preview-head img {
+.cm-preview-avatar-button {
+  position: relative;
   width: 48px;
   height: 48px;
+  display: block;
+  border: 1px solid transparent;
   border-radius: 6px;
+  background: var(--cm-control-bg);
+  color: var(--cm-text);
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.cm-preview-avatar-button:hover,
+.cm-preview-avatar-button:focus-visible {
+  border-color: var(--cm-accent);
+  outline: none;
+}
+
+.cm-preview-avatar-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.cm-preview-avatar-button span {
+  position: absolute;
+  inset: auto 0 0;
+  padding: 2px 0;
+  background: var(--cm-scrim);
+  color: var(--cm-text);
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0;
+  text-align: center;
+  transition: opacity 160ms ease;
+}
+
+.cm-preview-avatar-button:hover span,
+.cm-preview-avatar-button:focus-visible span {
+  opacity: 1;
+}
+
+.cm-visually-hidden-file {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .cm-title-input {
@@ -3350,51 +3737,68 @@ function formatError(error: unknown): string {
 .cm-preview-actions {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding-top: 2px;
+  justify-content: flex-end;
+  gap: 5px;
   white-space: nowrap;
 }
 
-.cm-launch-action {
-  min-height: 34px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.cm-preview-action-icon {
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
   border: 1px solid var(--cm-accent);
   border-radius: 8px;
   background: var(--cm-accent-bg);
   color: var(--cm-accent-text);
-  padding: 0 11px;
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 800;
-  line-height: 1;
 }
 
-.cm-launch-action:hover:not(:disabled),
-.cm-launch-action:focus-visible {
+.cm-preview-action-icon:not(.primary):not(.danger) {
+  border-color: var(--cm-border);
+  background: var(--cm-control-bg);
+  color: var(--cm-muted);
+}
+
+.cm-preview-action-icon.danger {
+  border-color: oklch(62% 0.18 28 / 70%);
+  background: oklch(28% 0.12 28 / 58%);
+  color: var(--cm-text);
+}
+
+.cm-preview-action-icon:hover:not(:disabled),
+.cm-preview-action-icon:focus-visible {
   background: var(--cm-accent);
   color: var(--cm-accent-contrast);
+  border-color: var(--cm-accent);
   outline: none;
 }
 
-.cm-launch-action:disabled {
+.cm-preview-action-icon.danger:hover:not(:disabled),
+.cm-preview-action-icon.danger:focus-visible {
+  border-color: var(--cm-danger);
+  background: oklch(36% 0.14 28 / 72%);
+  color: var(--cm-text);
+}
+
+.cm-preview-action-icon:disabled {
   cursor: wait;
   opacity: 0.58;
 }
 
-.cm-launch-action svg {
-  width: 14px;
-  height: 14px;
-  fill: currentColor;
+.cm-preview-action-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
 }
 
-.cm-preview-actions .cm-danger-action.compact {
-  min-height: 34px;
-  border-radius: 8px;
-  padding: 0 12px;
-  font-weight: 800;
-  line-height: 1;
+.cm-preview-action-icon.primary svg {
+  fill: currentColor;
+  stroke: none;
 }
 
 .cm-preview-head p {
@@ -3935,6 +4339,14 @@ function formatError(error: unknown): string {
   cursor: pointer;
 }
 
+.cm-secondary-action.compact {
+  min-height: 34px;
+  border-radius: 8px;
+  padding: 0 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .cm-primary-action:disabled,
 .cm-secondary-action:disabled {
   cursor: not-allowed;
@@ -4190,6 +4602,21 @@ function formatError(error: unknown): string {
 
   .cm-import-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cm-import-dialog {
+    width: min(100%, calc(100vw - 20px));
+    max-height: calc(100vh - 20px);
+  }
+
+  .cm-import-dialog-body {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .cm-import-mini-preview {
+    max-height: none;
+    overflow: visible;
   }
 
   .cm-header {
