@@ -10,6 +10,7 @@ import {
 import type {
   CharacterChatSummary,
   CharacterChatContent,
+  CharacterCoverMutationResult,
   CharacterDeleteApplyResult,
   CharacterDeleteOptions,
   CharacterDeletePreview,
@@ -42,11 +43,25 @@ type HostWindow = Window &
     getChatHistoryBrief?: (fileName: string) => Promise<unknown> | unknown;
     getThumbnailUrl?: (type: string, file: string) => string;
     importRawCharacter?: (filename: string, content: Blob) => Promise<Response>;
+    importRawWorldbook?: (filename: string, content: string) => Promise<Response>;
+    createOrReplaceWorldbook?: (worldbookName: string, worldbook?: unknown[], options?: unknown) => Promise<boolean>;
+    deleteWorldbook?: (worldbookName: string) => Promise<boolean>;
+    getCharWorldbookNames?: (characterName: string) => { primary: string | null; additional: string[] };
+    rebindCharWorldbooks?: (characterName: string, charWorldbooks: { primary: string | null; additional: string[] }) => Promise<void>;
+    getChatWorldbookName?: (chatName: string) => string | null;
+    rebindChatWorldbook?: (chatName: string, worldbookName: string) => Promise<void>;
     this_chid?: number | string;
     loadCharacter?: (id: number | string) => Promise<unknown> | unknown;
     jQuery?: (element: Element) => { trigger?: (eventName: string) => unknown };
     TavernHelper?: {
       importRawCharacter?: (filename: string, content: Blob) => Promise<Response>;
+      importRawWorldbook?: (filename: string, content: string) => Promise<Response>;
+      createOrReplaceWorldbook?: (worldbookName: string, worldbook?: unknown[], options?: unknown) => Promise<boolean>;
+      deleteWorldbook?: (worldbookName: string) => Promise<boolean>;
+      getCharWorldbookNames?: (characterName: string) => { primary: string | null; additional: string[] };
+      rebindCharWorldbooks?: (characterName: string, charWorldbooks: { primary: string | null; additional: string[] }) => Promise<void>;
+      getChatWorldbookName?: (chatName: string) => string | null;
+      rebindChatWorldbook?: (chatName: string, worldbookName: string) => Promise<void>;
       openCharacterChat?: (chatId: string) => Promise<unknown> | unknown;
       launchChat?: (character: string | { fileName?: string; avatar?: string }, chatId?: string) => Promise<unknown> | unknown;
     };
@@ -60,6 +75,8 @@ interface TavernContext {
   tags?: unknown[];
   tagMap?: Record<string, string[]>;
   saveSettingsDebounced?: () => Promise<unknown> | unknown;
+  saveWorldInfo?: (name: string, data: unknown, immediately?: boolean) => Promise<void>;
+  convertCharacterBook?: (characterBook: unknown) => unknown;
   openCharacterChat?: (chatId: string) => Promise<unknown> | unknown;
   selectCharacterById?: (id: number | string, options?: { switchMenu?: boolean }) => Promise<unknown> | unknown;
 }
@@ -226,7 +243,7 @@ export async function applyTagMutation(
 
   return {
     success: true,
-    message: `已更新 ${preview.changedFileNames.length} 个角色的标签。`,
+    message: '',
     preview,
     tags: updated.tags,
     tagMap: updated.tagMap,
@@ -437,6 +454,84 @@ export async function downloadCharacterFile(fileName: string, host: HostWindow =
   }
 }
 
+export async function applyCharacterCoverMutation(
+  fileName: string,
+  image: Blob,
+  imageName = 'cover.png',
+  host: HostWindow = getHostWindow(),
+): Promise<CharacterCoverMutationResult> {
+  try {
+    const response = await host.fetch('/api/characters/get', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ avatar_url: fileName }),
+    });
+    if (!response.ok) {
+      throw new Error(await getResponseError(response, '无法读取当前角色数据'));
+    }
+
+    const fullData = (await response.json()) as Record<string, any>;
+    const dataBlock = getCharacterDataBlock(fullData);
+    const FormDataCtor = host.FormData || window.FormData;
+    const formData = new FormDataCtor();
+    formData.append('avatar_url', fileName);
+    formData.append('ch_name', stringValue(dataBlock.name) || stripExtension(fileName));
+    formData.append('avatar', image, imageName || fileName);
+    formData.append('json_data', JSON.stringify(stripTransientChatFields(fullData)));
+
+    [
+      'description',
+      'first_mes',
+      'personality',
+      'scenario',
+      'mes_example',
+      'creator_notes',
+      'system_prompt',
+      'post_history_instructions',
+      'creator',
+      'character_version',
+      'talkativeness',
+    ].forEach(key => {
+      appendFormValue(formData, key, dataBlock[key]);
+    });
+
+    arrayValue(dataBlock.alternate_greetings).forEach(greeting => {
+      formData.append('alternate_greetings', greeting);
+    });
+    arrayValue(dataBlock.tags).forEach(tag => {
+      formData.append('tags', tag);
+    });
+    if (dataBlock.extensions && typeof dataBlock.extensions === 'object') {
+      formData.append('extensions', JSON.stringify(dataBlock.extensions));
+    }
+    if (dataBlock.character_book) {
+      appendFormValue(formData, 'character_book', dataBlock.character_book);
+    }
+    formData.append('fav', dataBlock.fav || dataBlock.extensions?.fav ? 'true' : 'false');
+
+    const editResponse = await host.fetch('/api/characters/edit', {
+      method: 'POST',
+      body: formData,
+    });
+    if (!editResponse.ok) {
+      throw new Error(await getResponseError(editResponse, '封面更新失败'));
+    }
+
+    await refreshHostCharacters(host);
+    return {
+      success: true,
+      message: '封面已更新。',
+      fileName,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message: `封面更新失败：${formatError(error)}`,
+      fileName,
+    };
+  }
+}
+
 export async function exportCharactersZip(
   fileNames: string[],
   host: HostWindow = getHostWindow(),
@@ -606,7 +701,7 @@ export async function deleteCharacterChat(
 
 export async function openCharacterChat(
   fileName: string,
-  chatFileName: string,
+  chatFileName = '',
   host: HostWindow = getHostWindow(),
 ): Promise<CharacterExportResult> {
   try {
@@ -619,7 +714,10 @@ export async function openCharacterChat(
       await launcher.call(helper, { fileName, avatar: fileName }, chatFileName);
       return { success: true, message: '', fileName };
     }
-    await selectHostCharacter(fileName, host, context);
+    await selectHostCharacter(fileName, host, context, chatFileName ? 250 : 0);
+    if (!chatFileName) {
+      return { success: true, message: '', fileName };
+    }
     if (typeof contextOpener === 'function') {
       await contextOpener.call(context, chatFileName);
       return { success: true, message: '', fileName };
@@ -643,7 +741,7 @@ export async function openCharacterChat(
   }
 }
 
-async function selectHostCharacter(fileName: string, host: HostWindow, context: TavernContext | undefined) {
+async function selectHostCharacter(fileName: string, host: HostWindow, context: TavernContext | undefined, settleMs = 250) {
   const source = context?.characters || host.characters || [];
   const characterIndex = source.findIndex(character => getCharacterFileName(character) === fileName);
   if (characterIndex < 0) {
@@ -654,17 +752,17 @@ async function selectHostCharacter(fileName: string, host: HostWindow, context: 
   const domButton = host.document?.getElementById(`CharID${characterIndex}`);
   if (domButton instanceof HTMLElement) {
     domButton.click();
-    await waitForHost(host, 250);
+    if (settleMs > 0) await waitForHost(host, settleMs);
     return;
   }
   if (typeof context?.selectCharacterById === 'function') {
     await context.selectCharacterById(characterIndex, { switchMenu: false });
-    await waitForHost(host, 250);
+    if (settleMs > 0) await waitForHost(host, settleMs);
     return;
   }
   if (typeof host.loadCharacter === 'function') {
     await host.loadCharacter(characterIndex);
-    await waitForHost(host, 250);
+    if (settleMs > 0) await waitForHost(host, settleMs);
     return;
   }
 }
@@ -869,11 +967,21 @@ export async function applyCharacterImport(
 
     try {
       await writeCharacterImport(candidate, host);
+      const worldBookMessage = await syncReplacementWorldBook(candidate, host);
       results.push({
         id: candidate.id,
         fileName: candidate.fileName,
         success: true,
-        message: candidate.action === 'update' ? `已更新 ${candidate.summary.name}` : `已导入 ${candidate.summary.name}`,
+        message: [
+          candidate.replaceTargetFileName
+            ? `已替换 ${candidate.summary.name}`
+            : candidate.action === 'update'
+              ? `已更新 ${candidate.summary.name}`
+              : `已导入 ${candidate.summary.name}`,
+          worldBookMessage,
+        ]
+          .filter(Boolean)
+          .join('；'),
       });
     } catch (error) {
       results.push({
@@ -905,6 +1013,136 @@ async function writeCharacterImport(candidate: CharacterImportCandidate, host: H
   }
 
   await importWithNativeFileInput(candidate, host, nativeInput);
+}
+
+async function syncReplacementWorldBook(candidate: CharacterImportCandidate, host: HostWindow): Promise<string> {
+  if (!candidate.replaceTargetFileName) return '';
+
+  const oldBookName = candidate.existingDetail?.character_book || candidate.match?.character_book || '';
+  const newBookValue = getImportedCharacterBook(candidate);
+  const newBookName = getBookName(newBookValue);
+  if (!oldBookName || !newBookName || oldBookName === newBookName) return '';
+
+  try {
+    if (isEmbeddedBookValue(newBookValue)) {
+      const imported = await importEmbeddedWorldBook(newBookName, newBookValue, host);
+      if (!imported) {
+        return `角色已替换；世界书“${newBookName}”未能自动导入，需手动处理。`;
+      }
+    }
+
+    const rebound = await rebindReplacementWorldBook(oldBookName, newBookName, candidate.fileName, host);
+    if (!rebound) {
+      return `角色已替换；无法确认旧世界书“${oldBookName}”的绑定迁移，已保留旧世界书。`;
+    }
+
+    const deleted = await deleteCharacterWorldBook(oldBookName, host).catch(() => false);
+    return deleted
+      ? `已迁移世界书绑定并删除旧世界书“${oldBookName}”。`
+      : `已迁移世界书绑定；旧世界书“${oldBookName}”删除失败，需手动处理。`;
+  } catch (error) {
+    return `角色已替换；世界书迁移失败：${formatError(error)}`;
+  }
+}
+
+function getImportedCharacterBook(candidate: CharacterImportCandidate): unknown {
+  const rawData = candidate.mergedRaw?.data && typeof candidate.mergedRaw.data === 'object' ? candidate.mergedRaw.data : candidate.mergedRaw;
+  return candidate.card.character_book || rawData.character_book || '';
+}
+
+async function importEmbeddedWorldBook(bookName: string, book: unknown, host: HostWindow): Promise<boolean> {
+  const context = getContext(host);
+  const helper = getTavernHelper(host);
+  const convertedBook = context?.convertCharacterBook?.(book) || normalizeEmbeddedBookForImport(book);
+  const serializedBook = JSON.stringify(convertedBook || book);
+  const importRawWorldbook = helper.importRawWorldbook || host.importRawWorldbook;
+  if (typeof importRawWorldbook === 'function') {
+    const response = await importRawWorldbook.call(helper.importRawWorldbook ? helper : host, bookName, serializedBook);
+    if (response.ok) return true;
+  }
+  if (typeof context?.saveWorldInfo === 'function') {
+    await context.saveWorldInfo(bookName, convertedBook || book, true);
+    return true;
+  }
+  const createOrReplaceWorldbook = helper.createOrReplaceWorldbook || host.createOrReplaceWorldbook;
+  if (typeof createOrReplaceWorldbook === 'function') {
+    return Boolean(await createOrReplaceWorldbook.call(helper.createOrReplaceWorldbook ? helper : host, bookName, getEmbeddedBookEntries(book)));
+  }
+  return false;
+}
+
+async function rebindReplacementWorldBook(oldBookName: string, newBookName: string, fileName: string, host: HostWindow): Promise<boolean> {
+  const helper = getTavernHelper(host);
+  if (typeof helper.rebindCharWorldbooks !== 'function') return false;
+
+  const source = getContext(host)?.characters || host.characters || [];
+  const affectedCharacters = source.filter(character => getBookName(character.data?.character_book || character.character_book) === oldBookName);
+  const targets = affectedCharacters.length > 0 ? affectedCharacters : [findHostCharacter(fileName, host)].filter(Boolean);
+
+  for (const character of targets) {
+    const characterName = character?.name || getCharacterFileName(character!);
+    const current = readCharWorldbookBinding(characterName, helper);
+    const additional = current.additional.filter(name => name && name !== oldBookName && name !== newBookName);
+    await helper.rebindCharWorldbooks(characterName, { primary: newBookName, additional });
+    if (character?.data) character.data.character_book = newBookName;
+    if (character) character.character_book = newBookName;
+  }
+
+  await rebindReplacementChatWorldBooks(oldBookName, newBookName, fileName, helper, host);
+  return true;
+}
+
+async function rebindReplacementChatWorldBooks(
+  oldBookName: string,
+  newBookName: string,
+  fileName: string,
+  helper: HostWindow['TavernHelper'],
+  host: HostWindow,
+) {
+  if (typeof helper?.getChatWorldbookName !== 'function' || typeof helper.rebindChatWorldbook !== 'function') return;
+  const chats = await readCharacterChats(fileName, host).catch(() => []);
+  for (const chat of chats) {
+    const chatBookName = helper.getChatWorldbookName(chat.fileName);
+    if (chatBookName === oldBookName) {
+      await helper.rebindChatWorldbook(chat.fileName, newBookName);
+    }
+  }
+}
+
+function readCharWorldbookBinding(
+  characterName: string,
+  helper: HostWindow['TavernHelper'],
+): { primary: string | null; additional: string[] } {
+  if (typeof helper?.getCharWorldbookNames !== 'function') return { primary: null, additional: [] };
+  try {
+    const current = helper.getCharWorldbookNames(characterName);
+    return {
+      primary: current?.primary || null,
+      additional: Array.isArray(current?.additional) ? current.additional : [],
+    };
+  } catch {
+    return { primary: null, additional: [] };
+  }
+}
+
+function normalizeEmbeddedBookForImport(book: unknown): unknown {
+  if (!book || typeof book !== 'object') return book;
+  const record = book as Record<string, unknown>;
+  if (Array.isArray(record.entries)) return { ...record, entries: record.entries };
+  if (Array.isArray(record.entries_list)) return { ...record, entries: record.entries_list };
+  return book;
+}
+
+function getEmbeddedBookEntries(book: unknown): unknown[] {
+  if (!book || typeof book !== 'object') return [];
+  const record = book as Record<string, unknown>;
+  if (Array.isArray(record.entries)) return record.entries;
+  if (Array.isArray(record.entries_list)) return record.entries_list;
+  return [];
+}
+
+function getTavernHelper(host: HostWindow): NonNullable<HostWindow['TavernHelper']> {
+  return (host.TavernHelper || window.TavernHelper || {}) as NonNullable<HostWindow['TavernHelper']>;
 }
 
 function getImportRawCharacter(host: HostWindow): ((filename: string, content: Blob) => Promise<Response>) | undefined {
@@ -1079,6 +1317,11 @@ async function deleteCharacterChats(target: CharacterDeleteTarget, host: HostWin
 
 async function deleteCharacterWorldBook(name: string, host: HostWindow): Promise<boolean> {
   if (!name) return false;
+  const helper = getTavernHelper(host);
+  const deleteWorldbookFn = helper.deleteWorldbook || host.deleteWorldbook;
+  if (typeof deleteWorldbookFn === 'function') {
+    return Boolean(await deleteWorldbookFn.call(helper.deleteWorldbook ? helper : host, name));
+  }
   const response = await fetchFirstOk(
     [
       { url: '/api/worldinfo/delete', body: { name } },
@@ -1544,6 +1787,32 @@ function triggerDownload(blob: Blob, fileName: string, host: HostWindow) {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function getCharacterDataBlock(fullData: Record<string, any>): Record<string, any> {
+  return fullData.data && typeof fullData.data === 'object' && !Array.isArray(fullData.data) ? fullData.data : fullData;
+}
+
+function stripTransientChatFields(fullData: Record<string, any>): Record<string, any> {
+  const cloned = JSON.parse(JSON.stringify(fullData)) as Record<string, any>;
+  delete cloned.chat;
+  if (cloned.data && typeof cloned.data === 'object') {
+    delete cloned.data.chat;
+  }
+  return cloned;
+}
+
+function appendFormValue(formData: FormData, key: string, value: unknown) {
+  if (value === undefined || value === null) return;
+  if (typeof value === 'string') {
+    formData.append(key, value);
+    return;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    formData.append(key, String(value));
+    return;
+  }
+  formData.append(key, JSON.stringify(value));
 }
 
 function sanitizeCharacterName(name: string): string {

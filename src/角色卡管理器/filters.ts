@@ -1,4 +1,5 @@
 import type { CharacterFilter, CharacterSort, CharacterSummary, TagFilterMode } from './types';
+import { isArchivedCharacter } from './tags';
 
 export function filterCharacters(
   characters: CharacterSummary[],
@@ -9,8 +10,14 @@ export function filterCharacters(
 ): CharacterSummary[] {
   const keyword = query.trim().toLocaleLowerCase('zh-CN');
   return characters.filter(character => {
-    if (!matchesFilter(character, filter)) return false;
-    if (!matchesTags(character, activeTagIds, tagFilterMode)) return false;
+    const archived = isArchivedCharacter(character);
+    if (filter === 'archived') {
+      if (!archived) return false;
+    } else {
+      if (archived) return false;
+      if (!matchesFilter(character, filter)) return false;
+      if (!matchesTags(character, activeTagIds, tagFilterMode)) return false;
+    }
     if (!keyword) return true;
     return getSearchText(character).toLocaleLowerCase('zh-CN').includes(keyword);
   });
@@ -26,20 +33,23 @@ export function sortCharacters(characters: CharacterSummary[], sortBy: Character
 }
 
 export function getFilterCount(characters: CharacterSummary[], filter: CharacterFilter): number {
-  return characters.filter(character => matchesFilter(character, filter)).length;
+  if (filter === 'archived') return characters.filter(isArchivedCharacter).length;
+  return characters.filter(character => !isArchivedCharacter(character) && matchesFilter(character, filter)).length;
 }
 
 export function getFilterCounts(characters: CharacterSummary[]): Record<CharacterFilter, number> {
+  const visibleCharacters = characters.filter(character => !isArchivedCharacter(character));
   const counts: Record<CharacterFilter, number> = {
-    all: characters.length,
+    all: visibleCharacters.length,
     favorite: 0,
+    archived: characters.length - visibleCharacters.length,
     worldBook: 0,
     missingGreeting: 0,
     untagged: 0,
     error: 0,
   };
 
-  characters.forEach(character => {
+  visibleCharacters.forEach(character => {
     if (matchesFilter(character, 'favorite')) counts.favorite += 1;
     if (matchesFilter(character, 'worldBook')) counts.worldBook += 1;
     if (matchesFilter(character, 'missingGreeting')) counts.missingGreeting += 1;

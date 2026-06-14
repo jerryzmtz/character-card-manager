@@ -100,13 +100,14 @@ export async function buildImportCandidate(
   tags: CharacterTag[],
   tagMap: Record<string, string[]>,
   readExistingDetail: (fileName: string, base?: CharacterSummary) => Promise<CharacterDetail>,
+  replaceTarget?: CharacterSummary,
 ): Promise<CharacterImportCandidate> {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   try {
     const parsed = await parseImportSource(input);
-    const sourceFileName = ensureCharacterFileName(input.sourceName, parsed.format);
+    const sourceFileName = replaceTarget?.fileName || ensureCharacterFileName(input.sourceName, parsed.format);
     const summary = normalizeSummary({ avatar: sourceFileName, name: stringValue(parsed.card.name), data: parsed.card });
-    const match = characters.find(character => character.fileName === sourceFileName);
+    const match = replaceTarget || characters.find(character => character.fileName === sourceFileName);
     const nameConflict = match
       ? undefined
       : characters.find(character => normalizeName(character.name) === normalizeName(summary.name));
@@ -120,6 +121,20 @@ export async function buildImportCandidate(
         level: 'warning',
         message: `已有同名角色“${nameConflict.name}”，但文件名不同，将按新增处理。`,
       });
+    }
+    if (replaceTarget) {
+      issues.push({
+        level: 'info',
+        message: `将替换当前角色“${replaceTarget.name}”，保留原文件名 ${replaceTarget.fileName}。`,
+      });
+      const oldBookName = replaceTarget.character_book;
+      const newBookName = displayWorldBookValue(parsed.card.character_book);
+      if (oldBookName && newBookName) {
+        issues.push({
+          level: 'info',
+          message: `世界书：将尝试导入新内嵌世界书“${newBookName}”，迁移旧世界书“${oldBookName}”的绑定后删除旧世界书。`,
+        });
+      }
     }
 
     const candidate: CharacterImportCandidate = {
@@ -145,6 +160,7 @@ export async function buildImportCandidate(
       mergedRaw,
       importBlob,
       diff: buildImportDiff(parsed.card, mergedRaw, existingDetail, match, tags, tagMap),
+      replaceTargetFileName: replaceTarget?.fileName,
     };
 
     return candidate;
