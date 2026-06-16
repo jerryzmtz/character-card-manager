@@ -11,6 +11,7 @@ import {
   applyFavoriteMutation,
   applySourceUrlMutation,
   applyTagMutation,
+  applyUserNoteMutation,
   deleteCharacterChat,
   downloadCharacterChats,
   downloadCharacterFile,
@@ -52,6 +53,7 @@ function makeCharacter(patch: Partial<CharacterSummary> = {}): CharacterSummary 
     character_book: '',
     worldBookEmbedded: false,
     sourceUrl: '',
+    userNote: '',
     firstMes: '你好，旅行者。',
     altGreetingCount: 0,
     tokens: 1200,
@@ -75,7 +77,7 @@ describe('角色卡数据读取与归一化', () => {
         alternate_greetings: ['早安', 'こんばんは'],
         character_book: { name: '雪国世界书' },
         character_version: '2.1',
-        extensions: { source_url: 'https://discord.com/channels/123/456/789' },
+        extensions: { source_url: 'https://discord.com/channels/123/456/789', user_note: '只给自己看的备注' },
       },
     });
 
@@ -83,6 +85,7 @@ describe('角色卡数据读取与归一化', () => {
     expect(summary.fav).toBe(true);
     expect(summary.character_book).toBe('雪国世界书');
     expect(summary.sourceUrl).toBe('https://discord.com/channels/123/456/789');
+    expect(summary.userNote).toBe('只给自己看的备注');
     expect(summary.altGreetingCount).toBe(2);
     expect(summary.issues.map(issue => issue.message).join('\n')).toContain('关联世界书');
   });
@@ -93,14 +96,15 @@ describe('角色卡数据读取与归一化', () => {
         avatar: '雪乃.webp',
         name: '雪乃',
         data: {
-          extensions: { source_url: 'https://card.example/source' },
+          extensions: { source_url: 'https://card.example/source', user_note: '卡内备注' },
         },
       },
       undefined,
-      { source_url: 'https://legacy.example/source' },
+      { source_url: 'https://legacy.example/source', user_note: '旧脚本备注' },
     );
 
     expect(summary.sourceUrl).toBe('https://legacy.example/source');
+    expect(summary.userNote).toBe('旧脚本备注');
   });
 
   it('优先使用角色原图并保留酒馆缩略图兜底', () => {
@@ -242,15 +246,17 @@ describe('角色卡导入解析与预览', () => {
     expect(candidate.diff.find(group => group.id === 'metadata')?.rows.some(row => row.label === '深度提示')).toBe(false);
   });
 
-  it('更新时新卡缺少来源 URL 会保留旧卡来源 URL 到最终导入数据', async () => {
+  it('更新时新卡缺少管理器元数据会保留旧卡来源 URL 和备注', async () => {
     const existingWithSource = makeCharacter({
       fileName: '莉莉丝.png',
       name: '莉莉丝',
       sourceUrl: 'https://discord.com/channels/old/source',
+      userNote: '旧卡备注',
     });
     const detailWithSource: CharacterDetail = {
       ...existingDetail,
       sourceUrl: 'https://discord.com/channels/old/source',
+      userNote: '旧卡备注',
     };
     const blob = new Blob([JSON.stringify({ data: { name: '莉莉丝', description: '新描述', first_mes: '新开场' } })], {
       type: 'application/json',
@@ -268,9 +274,11 @@ describe('角色卡导入解析与预览', () => {
 
     expect(extensions.source_url).toBe('https://discord.com/channels/old/source');
     expect(extensions.source_link).toBe('https://discord.com/channels/old/source');
+    expect(extensions.user_note).toBe('旧卡备注');
     expect(candidate.diff.find(group => group.id === 'metadata')?.rows.find(row => row.label === '来源 URL')?.finalValue).toBe(
       'https://discord.com/channels/old/source',
     );
+    expect(candidate.diff.find(group => group.id === 'metadata')?.rows.find(row => row.label === '备注')?.finalValue).toBe('旧卡备注');
   });
 
   it('同名但文件名不同默认新增并警告', async () => {
@@ -703,6 +711,51 @@ describe('写入型角色管理', () => {
     expect(failed.success).toBe(false);
     expect(failed.message).toContain('来源 URL 保存失败');
     expect(hostCharacter.data.extensions.source_url).toBe('https://discord.com/channels/1/2/3');
+  });
+
+  it('用户备注保存会写入扩展元数据，不修改角色描述，失败时回滚宿主内存', async () => {
+    const hostCharacter = {
+      avatar: '莉莉丝.png',
+      name: '莉莉丝',
+      data: {
+        description: '这是会进入提示词的角色描述',
+        extensions: { user_note: '旧备注' },
+      },
+    };
+    const host = {
+      characters: [hostCharacter],
+      fetch: vi.fn().mockResolvedValue({ ok: true, text: async () => '' }),
+    } as unknown as Window & typeof globalThis;
+
+    const result = await applyUserNoteMutation('莉莉丝.png', '  新备注  ', host);
+
+    expect(result.success).toBe(true);
+    expect(result.message).toBe('');
+    expect(result.userNote).toBe('新备注');
+    expect(host.fetch).toHaveBeenCalledWith(
+      '/api/characters/merge-attributes',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          avatar: '莉莉丝.png',
+          data: {
+            extensions: {
+              user_note: '新备注',
+            },
+          },
+        }),
+      }),
+    );
+    expect(hostCharacter.data.description).toBe('这是会进入提示词的角色描述');
+    expect(hostCharacter.data.extensions.user_note).toBe('新备注');
+
+    host.fetch = vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => '磁盘不可写' }) as typeof fetch;
+    const failed = await applyUserNoteMutation('莉莉丝.png', '失败备注', host);
+
+    expect(failed.success).toBe(false);
+    expect(failed.message).toContain('备注保存失败');
+    expect(hostCharacter.data.description).toBe('这是会进入提示词的角色描述');
+    expect(hostCharacter.data.extensions.user_note).toBe('新备注');
   });
 
   it('收藏切换失败会回滚宿主内存并返回中文错误', async () => {
@@ -1287,6 +1340,7 @@ describe('角色卡管理器组件', () => {
             name: selected?.name || '',
             first_mes: selected?.data.first_mes || '',
             description: '详情内容',
+            extensions: selected?.data.extensions || {},
           },
         }),
       } as Response;
@@ -1307,6 +1361,9 @@ describe('角色卡管理器组件', () => {
     await wrapper.get('input[placeholder="Discord / 发布页 URL"]').trigger('keydown.enter');
     await vi.waitFor(() => expect(context.characters[0].data.extensions.source_url).toBe('https://discord.com/channels/1/2/3'));
     await vi.waitFor(() => expect(wrapper.get('input[placeholder="Discord / 发布页 URL"]').attributes('disabled')).toBeUndefined());
+    await wrapper.get('textarea[aria-label="用户备注"]').setValue('仅管理器可见的备注');
+    await wrapper.get('textarea[aria-label="用户备注"]').trigger('blur');
+    await vi.waitFor(() => expect(context.characters[0].data.extensions.user_note).toBe('仅管理器可见的备注'));
     expect(wrapper.text()).toContain('详情内容');
     expect(wrapper.text()).not.toContain('无内容');
     await wrapper.get('input[aria-label="角色名称"]').setValue('新莉莉丝');

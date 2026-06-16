@@ -30,6 +30,7 @@ export interface CharacterSummary {
   character_book: string;
   worldBookEmbedded: boolean;
   sourceUrl: string;
+  userNote: string;
   firstMes: string;
   altGreetingCount: number;
   tokens: number;
@@ -200,6 +201,13 @@ export interface CharacterSourceUrlMutationResult {
   message: string;
   fileName: string;
   sourceUrl: string;
+}
+
+export interface CharacterUserNoteMutationResult {
+  success: boolean;
+  message: string;
+  fileName: string;
+  userNote: string;
 }
 
 export type CharacterImportSourceKind = 'file' | 'url';

@@ -37,6 +37,7 @@ test.beforeEach(async ({ page }) => {
           first_mes: '你好，旅行者。',
           character_book: { name: '夜城世界书', entries: [{ comment: '入口', content: '内容' }] },
           character_version: '1.0',
+          extensions: { user_note: '旧的用户备注' },
         },
       },
       {
@@ -172,6 +173,7 @@ test.beforeEach(async ({ page }) => {
                 : [],
             character_book: selected.data.character_book || '',
             character_version: selected.data.character_version || '',
+            extensions: selected.data.extensions || {},
           },
         }),
       };
@@ -329,6 +331,12 @@ test('卡片收藏即时写入，右侧名称输入后迁移标签', async ({ pa
 
   await page.locator('.cm-card', { hasText: '莉莉丝' }).click();
   await expect(page.locator('.cm-preview')).toContainText('夜城里的观察者');
+  await expect(page.getByLabel('用户备注')).toHaveValue('旧的用户备注');
+  await page.getByLabel('用户备注').fill('只给管理器看的中文备注');
+  await page.getByLabel('用户备注').blur();
+  await expect(page.evaluate(() => window.characters.find(character => character.avatar === '莉莉丝.png')?.data.extensions?.user_note)).resolves.toBe(
+    '只给管理器看的中文备注',
+  );
   await page.getByLabel('角色名称').fill('新莉莉丝');
   await page.getByLabel('角色名称').press('Enter');
 

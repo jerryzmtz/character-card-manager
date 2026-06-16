@@ -36,11 +36,12 @@ const META_FIELDS = [
   ['creator_notes', '作者备注'],
 ] as const;
 
-const PRESERVED_EXTENSION_KEYS = ['source', 'source_url', 'url', 'fav', 'talkativeness', 'depth_prompt'];
+const PRESERVED_EXTENSION_KEYS = ['source', 'source_url', 'url', 'user_note', 'fav', 'talkativeness', 'depth_prompt'];
 const EXTENSION_FIELD_LABELS: Record<string, string> = {
   source: '来源',
   source_url: '来源 URL',
   url: '来源 URL',
+  user_note: '备注',
   fav: '收藏状态',
   talkativeness: '发言倾向',
   depth_prompt: '深度提示',
@@ -452,6 +453,7 @@ function getExistingExtensions(detail: CharacterDetail | undefined): Record<stri
   return {
     source_url: detail.sourceUrl || undefined,
     source_link: detail.sourceUrl || undefined,
+    user_note: detail.userNote || undefined,
     fav: detail.fav || undefined,
   };
 }

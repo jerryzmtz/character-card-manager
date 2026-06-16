@@ -27,6 +27,7 @@ import type {
   CharacterSourceUrlMutationResult,
   CharacterSummary,
   CharacterTag,
+  CharacterUserNoteMutationResult,
   CharacterWorldBookLink,
   CharacterZipExportResult,
   TagMutationDraft,
@@ -337,6 +338,51 @@ export async function applySourceUrlMutation(
       message: `来源 URL 保存失败：${formatError(error)}`,
       fileName,
       sourceUrl: getSourceUrl(target?.data || {}),
+    };
+  }
+}
+
+export async function applyUserNoteMutation(
+  fileName: string,
+  userNote: string,
+  host: HostWindow = getHostWindow(),
+): Promise<CharacterUserNoteMutationResult> {
+  const nextUserNote = userNote.trim();
+  const target = findHostCharacter(fileName, host);
+  const previous = snapshotCharacterData(target);
+  writeUserNoteToMemory(target, nextUserNote);
+
+  try {
+    const response = await host.fetch('/api/characters/merge-attributes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        avatar: fileName,
+        data: {
+          extensions: {
+            user_note: nextUserNote,
+          },
+        },
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(await getResponseError(response, '备注保存失败'));
+    }
+    await writeLegacyUserNote(fileName, nextUserNote, host);
+
+    return {
+      success: true,
+      message: '',
+      fileName,
+      userNote: nextUserNote,
+    };
+  } catch (error) {
+    restoreCharacterData(target, previous);
+    return {
+      success: false,
+      message: `备注保存失败：${formatError(error)}`,
+      fileName,
+      userNote: getUserNote(target?.data || {}),
     };
   }
 }
@@ -1480,6 +1526,7 @@ function normalizeSummaryWithMeta(
     character_book: characterBook,
     worldBookEmbedded: isEmbeddedBookValue(rawBook),
     sourceUrl: getSourceUrl(data, raw, legacyMeta),
+    userNote: getUserNote(data, legacyMeta),
     firstMes,
     altGreetingCount: altGreetings.length,
     tokens: numberValue(raw.tokens),
@@ -1518,6 +1565,7 @@ export function normalizeDetail(
     tagIds: base?.tagIds || summary.tagIds,
     tags: base?.tags || summary.tags,
     sourceUrl: base?.sourceUrl || summary.sourceUrl,
+    userNote: base?.userNote || summary.userNote,
     description: stringValue(data.description),
     personality: stringValue(data.personality),
     scenario: stringValue(data.scenario),
@@ -1653,22 +1701,44 @@ async function readLegacyCharMetaMap(host: HostWindow): Promise<Record<string, R
 
 async function writeLegacySourceUrl(fileName: string, sourceUrl: string, host: HostWindow) {
   try {
-    const data = await readLegacyCharMetaMap(host);
-    const current = data[fileName] && typeof data[fileName] === 'object' ? data[fileName] : {};
-    if (sourceUrl) {
-      data[fileName] = { ...current, source_url: sourceUrl };
-    } else {
-      const { source_url: _removed, ...rest } = current;
-      if (Object.keys(rest).length > 0) {
-        data[fileName] = rest;
-      } else {
-        delete data[fileName];
-      }
-    }
-    await writeLegacyMetaDB(host, LEGACY_META_KEY, data);
+    await writeLegacyCharMetaPatch(fileName, { source_url: sourceUrl }, host);
   } catch (error) {
     console.warn('[CharacterCardManager] 旧角色卡管理器来源 URL 缓存同步失败', error);
   }
+}
+
+async function writeLegacyUserNote(fileName: string, userNote: string, host: HostWindow) {
+  try {
+    await writeLegacyCharMetaPatch(fileName, { user_note: userNote }, host);
+  } catch (error) {
+    console.warn('[CharacterCardManager] 旧角色卡管理器备注缓存同步失败', error);
+  }
+}
+
+async function writeLegacyCharMetaPatch(fileName: string, patch: Record<string, unknown>, host: HostWindow) {
+  const data = await readLegacyCharMetaMap(host);
+  const current = data[fileName] && typeof data[fileName] === 'object' ? data[fileName] : {};
+  const next = { ...current };
+  Object.entries(patch).forEach(([key, value]) => {
+    if (isEmptyMetaValue(value)) {
+      delete next[key];
+    } else {
+      next[key] = value;
+    }
+  });
+  if (Object.keys(next).length > 0) {
+    data[fileName] = next;
+  } else {
+    delete data[fileName];
+  }
+  await writeLegacyMetaDB(host, LEGACY_META_KEY, data);
+}
+
+function isEmptyMetaValue(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (typeof value === 'string') return value.trim().length === 0;
+  if (Array.isArray(value)) return value.length === 0;
+  return false;
 }
 
 function readLegacyMetaDB(host: HostWindow, key: string): Promise<unknown> {
@@ -1747,6 +1817,19 @@ function writeSourceUrlToMemory(character: TavernCharacter | undefined, sourceUr
     delete character.data.extensions.source_link;
     delete character.data.extensions.source;
     delete character.data.extensions.url;
+  }
+}
+
+function writeUserNoteToMemory(character: TavernCharacter | undefined, userNote: string) {
+  if (!character) return;
+  character.data = character.data || {};
+  if (!character.data.extensions || typeof character.data.extensions !== 'object') {
+    character.data.extensions = {};
+  }
+  if (userNote) {
+    character.data.extensions.user_note = userNote;
+  } else {
+    delete character.data.extensions.user_note;
   }
 }
 
@@ -1880,6 +1963,11 @@ function getSourceUrl(data: Record<string, any>, raw: TavernCharacter = {}, lega
       (raw as Record<string, unknown>).source_url ||
       (raw as Record<string, unknown>).sourceUrl,
   );
+}
+
+function getUserNote(data: Record<string, any>, legacyMeta: Record<string, any> = {}): string {
+  const extensions = data.extensions && typeof data.extensions === 'object' ? data.extensions : {};
+  return stringValue(legacyMeta.user_note || extensions.user_note || data.user_note);
 }
 
 function stripExtension(fileName: string): string {

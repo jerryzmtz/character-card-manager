@@ -9,6 +9,7 @@ import {
   applyFavoriteMutation,
   applySourceUrlMutation,
   applyTagMutation,
+  applyUserNoteMutation,
   deleteCharacterChat,
   downloadCharacterChats,
   downloadCharacterFile,
@@ -50,7 +51,7 @@ interface ImportDiffLine {
 }
 
 const DETAIL_LOADING_DELAY_MS = 180;
-const APP_VERSION = '1.05';
+const APP_VERSION = '1.06';
 const TAG_FILTER_MODE_KEY = 'character-card-manager:tag-filter-mode';
 const CHAT_ALIAS_KEY = 'character-card-manager:chat-aliases';
 const CARD_GRID_GAP_PX = 8;
@@ -115,6 +116,9 @@ const deletingChatKeys = ref<Set<string>>(new Set());
 const sourceUrlDraft = ref('');
 const sourceUrlError = ref('');
 const savingSourceUrl = ref(false);
+const userNoteDraft = ref('');
+const userNoteError = ref('');
+const savingUserNote = ref(false);
 const renameInput = ref('');
 const applyingRename = ref(false);
 const avatarUrlIndex = ref<Record<string, number>>({});
@@ -241,6 +245,8 @@ watch(
   () => {
     sourceUrlDraft.value = activePreview.value?.sourceUrl || '';
     sourceUrlError.value = '';
+    userNoteDraft.value = activePreview.value?.userNote || '';
+    userNoteError.value = '';
     chatsExpanded.value = false;
     expandedChatKey.value = '';
   },
@@ -262,6 +268,15 @@ watch(
   value => {
     if (!savingSourceUrl.value) {
       sourceUrlDraft.value = value || '';
+    }
+  },
+);
+
+watch(
+  () => activePreview.value?.userNote,
+  value => {
+    if (!savingUserNote.value) {
+      userNoteDraft.value = value || '';
     }
   },
 );
@@ -825,6 +840,13 @@ function setCharacterSourceUrl(fileName: string, sourceUrl: string) {
   }
 }
 
+function setCharacterUserNote(fileName: string, userNote: string) {
+  characters.value = characters.value.map(character => (character.fileName === fileName ? { ...character, userNote } : character));
+  if (selectedDetail.value?.fileName === fileName) {
+    selectedDetail.value = { ...selectedDetail.value, userNote };
+  }
+}
+
 async function saveSourceUrl() {
   if (!activePreview.value || savingSourceUrl.value) return;
   const fileName = activePreview.value.fileName;
@@ -855,6 +877,27 @@ async function clearSourceUrl() {
 function openSourceUrl() {
   if (!canOpenSourceUrl.value) return;
   window.open(sourceUrlDraft.value.trim(), '_blank', 'noopener,noreferrer');
+}
+
+async function saveUserNote() {
+  if (!activePreview.value || savingUserNote.value) return;
+  const fileName = activePreview.value.fileName;
+  const nextUserNote = userNoteDraft.value.trim();
+  if (nextUserNote === (activePreview.value.userNote || '')) return;
+
+  savingUserNote.value = true;
+  userNoteError.value = '';
+  try {
+    const result = await applyUserNoteMutation(fileName, nextUserNote);
+    if (result.success) {
+      setCharacterUserNote(fileName, result.userNote);
+    } else {
+      userNoteDraft.value = activePreview.value?.userNote || result.userNote;
+      userNoteError.value = result.message;
+    }
+  } finally {
+    savingUserNote.value = false;
+  }
 }
 
 async function applyFavoriteChange(character: CharacterSummary, nextFav: boolean, refreshAfterSuccess = true) {
@@ -1968,6 +2011,21 @@ function formatError(error: unknown): string {
             </div>
             <p v-if="sourceUrlError">{{ sourceUrlError }}</p>
           </div>
+
+          <label class="cm-user-note">
+            <span>备注</span>
+            <textarea
+              v-model="userNoteDraft"
+              rows="2"
+              aria-label="用户备注"
+              placeholder="只在管理器里显示"
+              :disabled="savingUserNote"
+              @blur="saveUserNote"
+              @keydown.ctrl.enter.prevent="saveUserNote"
+              @keydown.meta.enter.prevent="saveUserNote"
+            />
+            <p v-if="userNoteError">{{ userNoteError }}</p>
+          </label>
 
           <section class="cm-chat-panel" aria-label="聊天记录">
             <div class="cm-section-head">
@@ -4030,6 +4088,46 @@ function formatError(error: unknown): string {
 
 .cm-source-url p {
   grid-column: 1 / -1;
+  margin: 0;
+  color: var(--cm-danger);
+  font-size: 12px;
+}
+
+.cm-user-note {
+  display: grid;
+  gap: 5px;
+}
+
+.cm-user-note span {
+  color: var(--cm-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cm-user-note textarea {
+  width: 100%;
+  min-height: 54px;
+  resize: vertical;
+  border: 1px solid var(--cm-border);
+  border-radius: 6px;
+  background: var(--cm-control-bg);
+  color: var(--cm-text);
+  padding: 7px 9px;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.cm-user-note textarea:focus {
+  border-color: var(--cm-accent);
+  outline: none;
+}
+
+.cm-user-note textarea:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.cm-user-note p {
   margin: 0;
   color: var(--cm-danger);
   font-size: 12px;
